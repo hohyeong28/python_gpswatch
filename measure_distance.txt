@@ -1,0 +1,108 @@
+현 위치 :  37.340218, 126.940889 alt : 65
+
+이 함수에서 홀이 fix 가 되면 measure_distance.py 를 진행 한다.
+ measure_distance.py 는 첨부 이미지처럼 구성이 된다.
+1. 현재 시간, 배터리 잔량 정보가 표시 된다.
+2. L/R 좌/우 그린 선택 표시가 있다. 기본은 좌그린(L) 이다.
+3. 현재 fix 된 홀의 Hole,  PAR 정보가 표시
+4. 설정에서 단위 설정, 거리 안내, 스코어카드의 내용을 연동 한다.
+5. 거리 계산은 현재 위치 기준, L 선택 시 LG, R 선택 시 RG 까지 의 거리이다.
+이전에 만들어진 config.py, entry_menu.py, playgolf.py, setting.py 등의 코드는 필요 시 연동해서 적용을 한다.
+내용 확인 하라
+
+
+1. playgolf.py의 find_1st_hole() 함수에서 현재 홀이 fix가 되면 measure_distance.py의 화면으로 이동
+2. fix가 지점에서 가장 가까운 T 또는 IP의 지점을 확인(fix_point)
+2. 상단 바 : 현재 시간 PC의 현재 시간, 배터리는 87%로
+3.  LG 데이터만 있고, RG 데이터가 없는 경우는 아무 표시하지 않는다. LG는 항상 있고, RG는 있는 경우, 없는 경우가 있다.
+    L 은 left_green.png, R은 right_green.png를 사용. LG, RG가 모두 있는 경우 기본은 L이고, 터치(클릭)으로 변경
+    L R이 없는 경우와 L인 경우 LG까지의거리 계산, R인 경우 RG까지의 거리 계산으로 변경
+4. 홀 정보는 "H"후 현재 Hole 데이터, "P"후 현재 홀 PAR 데이터를 출력
+5. 설정에서 "단위 설정"이 M 인 경우 "M"을 표시, Yd 인 경우 "Y"를 표시하고 계산한 거리 값에 1.09361을 곱 한 후 반올림 한다.
+6. 거리를 측정하는 지점은
+  (LG1~LG20) 또는 (RG1~RG20)의 데이터에서 현재 위치와 LG 또는 RG를 연결하는 직선과 만나는 또는 직선과 가장 가까운 지점 중
+  현 위치에서 거리가 가까운 곳을 front, 거리가 먼 곳을 back으로 한다. LG 또는 RG는 center 이다.
+7. 거리 계산은 현재 위치에서, front, center, end 지점 까지의 거리를 계산한다.
+8. 설정에서 "거리 안내" 가 보정 거리일 경우
+   현위치에서 각 지점까지의 거리를 계산 : flat_dist_front, flat_dist_center, flat_dist_back
+   alt 비교는 center을 기준으로 한다.
+   diff_h = (LG 또는 RG의 alt값) -  (fix_point의 alt 값)을 계산. 양수이면 오르막, 음수이면 내리막
+   eDist = flat_dist_center + diff_h
+   landing = -0.11 * eDist + 64, eDist<80 이면 80, eDist>220 이면 220 
+   extended_dist = flat_dist_center * diff_h/tan(landing)
+   distance_center = flat_dist_center + extended_dist
+   distance_front = flat_dist_front + extended_dist
+   distance_back = flat_dist_back + extended_dist
+   화면 중앙에 distance_center를 큰 글씨로 표시하고, 조금 작은 글씨로 distance_front, distance_back 을 각각 아래에, 위에 표시 한다.
+   화면 우측에 diff_h 가 양수이면 uphill.png를, 음수이면 downhill.png를 표시 한다. 이미지 위에 diff_h값을 표시 한다.
+
+   설정에서 "거리 안내" 가 직선 거리일 경우
+   distance_center = sqrt(flat_dist_center^2 + diff_h^2)
+   distance_front = sqrt(flat_dist_front^2 + diff_h^2)
+   distance_back = sqrt(flat_dist_front^2 + diff_h^2)
+   uphill.png, downhill.png, diff_h를 표시하지 않는다.
+
+9. 중앙 아래 부분에는 confirm.png를 표시 하고, "SHOT"이라 글씨를 추가 한다.
+
+[shot distance]
+_on_shot()에 대한 기능이다. 
+1. shot 클릭하면 shot_distance를 계산하고, 화면에 표시하는 기능을 한다.
+2. 버튼을 누르면 버튼이 울리는 순간의 lat,lng,alt 값이 start_point의 값이 된다.
+3. gps_distance는 (start_point로 부터 새로운 현재 지점) 까지의 거리이다.
+4. 고도차 계산은 (start_point의 alt 값 - 현재 위치의 alt 값)로 한다. delta_alt
+5. shot_distance = sqrt(gps_distance^2 - delta_alt^2)으로 계산 한다.
+6. 이렇게 계산된 값을 화면에 표시 한다. 표시는 첨부의 이미지 처럼 한다.
+7. shot_distance도 위치가 이동 되면서 계속 변화하는 값이다.
+8. 변화 중 다시 shot 클릭을 하면  2~6의 과정이 반복 된다.
+
+[On Green]
+그린에 진입했는지를 판단하는 함수를 추가한다. check_ongreen()
+1. LG 또는 RG는 green_selector와 연동해서 이루어 진다. L을 선택 시 LG, R을 선택 시 RG이다.
+2. distance_front가 5이하일 경우  check_ongreen() 함수를 내부적으로 실행한다.
+3. check_ongreen() 함수는 선택된 그린의 LG1~LG20, 또는 RG1~RG20의 좌표값이 이루는 폐곡선의 내부에 현재 위치가 존재하는가를 판단하는 함수이다.
+4. 내부에 있다고 판단이 되고, 3초동안 내부에 계속 있는지를 확인
+5. 3과 4의 경우가 만족 된다면 현재 위치는 on_green이라고 확정하고 meas_putt_distance.py를 실행
+
+[퍼팅 거리 측정]
+"START" 버튼을 누르면 다음의 동작을 수행한다.
+1. 화면이 첨부 이미지처럼 바뀐다. 
+   1-1 중앙에 있는 hole&falg.png 이 사라진다.
+   1-2 "퍼팅거리" 바로 위에 ball.png를 배치 한다.
+   1-3 ball.png 바로 위에 from_to.png를 배치한다. from_to.png 는 세로로 2개 배치한다. 중간(LCD 중앙)에 TEXT를 넣을 공간을 띄운다.
+2. 버튼을 누르는 순간의 좌표, lat,lng를 putt_start로 한다.
+3. putt_start의 위치로 부터 현재 좌표까지의 이동 거리를 계산한다.
+4. 계산된 거리를 화면 중앙에 TEXT로 삽입한다.
+
+[그린 외부로 나감 ==> scoring]
+1. 그린 내부에 존재함을 확인 한 후 다시 그린 밖으로 이동했는지를 확인 하는 함수를 추가 한다. out_of_green()
+   현재 존재하고 있는 그린(폐곡선 내부)에서 그린 밖(폐곡선 외부)으로 이동했는지를 검사 한다.
+2. 그린 밖으로 이동 후 3초가 지나면 scoring.py 를 호출 한다.
+
+[scoring]
+1. 백그라운드는 동일하게 사용한다.
+2. 첨부는 기본 화면 구성이다.
+3. Score_Line.png 가 중앙에 배치 된다
+4. 홀정보, 파정보(Hxx,Px)가 상단에 위치 한다.
+5. plus.png, minus.png 가 위치 한다.
+6. "파" 는 par_score_text이고 (0)에 있는 0 par_score이다.
+   par_score_text 와 par_score의 관계는 이글=-2, 버디=-1,파=0,보기=+1,D-보기=+2,T-보기=+3,Q-보기=+4이다
+  기본은 파, 0 이다.
+  +를 누르면 par_score 가 1씩 증가하고, -를 누르면 par_score 가 1씩 감소한다.
+7. "스코어"  아래의 수자 4는 score이다. 이는 해당홀의 PAR값 + par_score 값이다.
+8. "퍼트수" 아래의 수자는 putt_score 값이고 기본은 2이다.
+    "퍼트수"를 선택 한 후 +를 누르면 1씩 증가, -를 누르면 1씩 감소한다.
+    퍼트수의 글자는 기본 흰 색인데, 선택 후 활성화 되면 녹색으로 변경이 되면서 +/- 동작이 된다.
+    다시 퍼트수를 선택하면 글자는 기본 흰 색으로 돌아가고, +/- 동작이 par_score 값을 변화 시킨다. 
+9. +/-의 동작은 숫자를 1씩 증가 또는 감소시키는 역할이다. 기본은 putt_score를 변경 시킨다.
+   다만, 퍼트수를 선택 해 활성화 되면 putt_score값을 변경 한다.
+10. OK를 클릭하면 홀정보, 파정보, score, putt_score값을 저장한다.
+11. NextHole.py를 호출한다.
+
+[find_next_hole]
+1. 백그라운드는 동일하게 사용한다.
+2. 화면에 "다음홀로" "이동해 주세요"를 출력한다.
+3. find_next_hole() 함수를 실행 한다.
+4. find_next_hole은 find_1st_hole과 유사하다. 단 find_next_hole은 T1~T6에 대해서만 확인을 한다.
+
+
+
