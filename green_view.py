@@ -499,6 +499,33 @@ class GreenViewWindow(tk.Toplevel):
         length_display = int(round(green_pin_length * conv))
         width_display = int(round(width_val * conv))
 
+        # 6.5) 그린 근처 자동 복귀 처리
+        # entry_display 는 단위 변환이 반영된 값 (M 또는 Yd)
+        # → 20 이하면 "그린 근처입니다" 1초 표시 후 distance 화면으로 복귀
+        if entry_display <= 20:
+            # 배경 정리
+            self.canvas.delete("all")
+            try:
+                bg = self.load_image("background.png", size=(LCD_WIDTH, LCD_HEIGHT))
+                self.canvas.create_image(0, 0, anchor="nw", image=bg)
+            except FileNotFoundError:
+                self.canvas.create_oval(
+                    0, 0, LCD_WIDTH, LCD_HEIGHT, fill="black", outline=""
+                )
+
+            # 안내 문구 표시
+            self.canvas.create_text(
+                LCD_WIDTH // 2,
+                LCD_HEIGHT // 2,
+                text="그린 근처입니다",
+                fill="white",
+                font=("Helvetica", 30, "bold"),
+            )
+
+            # 1초 후 자동 종료(Measure Distance로 복귀)
+            self.after(1000, self._on_stop)
+            return  # 이후 그린/삼각형 등은 그리지 않음
+
         # 7) 화면에 그리기
 
         contour_screen = []
