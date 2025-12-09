@@ -111,6 +111,9 @@ class GreenViewWindow(tk.Toplevel):
         * cur_lat/lng: 현재 위치 WGS84
         * selected_green: 'L' or 'R'
       (pin_position 은 일단 center(LG 또는 RG)로 설정, 나중에 별도 값을 쓸 수 있음)
+    - STOP 버튼:
+        * (400, 400) 위치에 "STOP" 버튼 추가
+        * 클릭 시 이 GreenViewWindow 를 닫고, 부모(예: DistanceWindow)로 복귀
     """
 
     def __init__(
@@ -154,6 +157,13 @@ class GreenViewWindow(tk.Toplevel):
             bg="black",
         )
         self.canvas.pack()
+
+        # STOP 버튼 (400, 400 위치에 표시 예정)
+        self.stop_button = tk.Button(
+            self,
+            text="STOP",
+            command=self._on_stop,
+        )
 
         # ENU 변환
         self.tf = make_transformer(self.gc_center_lat, self.gc_center_lng)
@@ -528,6 +538,59 @@ class GreenViewWindow(tk.Toplevel):
             font=("Helvetica", 22, "bold"),
         )
 
+        # 6-7) STOP 버튼: (400, 400) 위치에 표시
+        self.canvas.create_window(
+            400,
+            400,
+            window=self.stop_button,
+        )
+
+    # --------- STOP 버튼 핸들러 --------- #
+
+    def _on_stop(self):
+        """
+        STOP 버튼 클릭 시:
+          - 이 GreenViewWindow 를 닫고
+          - 부모(예: DistanceWindow)를 다시 전면으로 올리고 포커스를 준다.
+        """
+        try:
+            parent = self.parent_window
+            self.destroy()
+            if parent is not None:
+                try:
+                    parent.lift()
+                    parent.focus_set()
+                except Exception:
+                    pass
+        except Exception as e:
+            print("[GreenView] STOP 처리 중 오류:", e)
+
+
+# ---------------- DistanceWindow 에서 사용할 엔트리 함수 ---------------- #
+
+def open_green_view_window(
+    parent: tk.Tk,
+    hole_row: pd.Series,
+    gc_center_lat: float,
+    gc_center_lng: float,
+    cur_lat: float,
+    cur_lng: float,
+    selected_green: str = "L",
+) -> GreenViewWindow:
+    """
+    DistanceWindow (또는 PlayGolfWindow) 등에서 GreenViewWindow 를 열기 위한
+    공식 엔트리 함수.
+    """
+    return GreenViewWindow(
+        parent=parent,
+        hole_row=hole_row,
+        gc_center_lat=gc_center_lat,
+        gc_center_lng=gc_center_lng,
+        cur_lat=cur_lat,
+        cur_lng=cur_lng,
+        selected_green=selected_green,
+    )
+
 
 # ---------------- 단독 테스트 ---------------- #
 
@@ -564,7 +627,7 @@ if __name__ == "__main__":
     gc_lat, gc_lng = 37.34, 126.94
     cur_lat, cur_lng = 37.3401, 126.9401  # 현재 위치
 
-    win = GreenViewWindow(
+    win = open_green_view_window(
         parent=root,
         hole_row=hole_row,
         gc_center_lat=gc_lat,

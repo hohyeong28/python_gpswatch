@@ -35,6 +35,11 @@
 #         현재 위치(E_cur, N_cur)가 있는지 검사
 #       * 3초 동안 연속 내부일 경우 on_green 확정
 #       * on_green 확정 시 meas_putt_distance.open_putt_window(...) 실행
+#
+#   - GreenView 버튼:
+#       * 화면 (400, 400) 위치에 "GreenView" 버튼 추가
+#       * 버튼 클릭 시 green_view.open_green_view_window(...) 실행
+#       * DistanceWindow 의 selected_green(L/R) 정보를 그대로 전달
 
 import math
 import time
@@ -127,6 +132,13 @@ class DistanceWindow(tk.Toplevel):
             bg="black",
         )
         self.canvas.pack()
+
+        # GreenView 버튼 (실제 위젯은 한 번만 만들고, 매 렌더링 시 canvas에 올린다)
+        self.greenview_button = tk.Button(
+            self,
+            text="GreenView",
+            command=self._on_green_view,
+        )
 
         # ENU 변환용 transformer
         self.tf = make_transformer(self.gc_center_lat, self.gc_center_lng)
@@ -570,6 +582,13 @@ class DistanceWindow(tk.Toplevel):
         if dist_info["mode"] == "corrected":
             self._draw_slope_indicator(dist_info["diff_h"])
 
+        # GreenView 버튼 (400, 400 위치에 표시)
+        self.canvas.create_window(
+            400,
+            400,
+            window=self.greenview_button,
+        )
+
     def _draw_top_bar(self):
         now_str = time.strftime("%H:%M")
         battery_str = "87%"
@@ -781,6 +800,51 @@ class DistanceWindow(tk.Toplevel):
         )
 
         self._render_screen()
+
+    def _on_green_view(self, event=None):
+        """
+        GreenView 버튼 클릭 시 green_view.py 실행.
+        - green_view.open_green_view_window(...) 를 호출한다.
+        - DistanceWindow 의 selected_green(L/R) 정보를 그대로 전달한다.
+        - parent 는 DistanceWindow(self)를 넘겨, STOP 시 이 창으로 쉽게 복귀 가능.
+        """
+        try:
+            import green_view
+        except ImportError:
+            print("[DistanceWindow] green_view 모듈을 찾을 수 없습니다.")
+            return
+
+        try:
+            if hasattr(green_view, "open_green_view_window"):
+                green_view.open_green_view_window(
+                    parent=self,  # DistanceWindow 를 부모로 사용
+                    hole_row=self.hole_row,
+                    gc_center_lat=self.gc_center_lat,
+                    gc_center_lng=self.gc_center_lng,
+                    cur_lat=self.cur_lat,
+                    cur_lng=self.cur_lng,
+                    selected_green=self.selected_green,
+                )
+            elif hasattr(green_view, "open_green_view"):
+                # fallback: 다른 이름의 팩토리 함수가 있을 경우
+                green_view.open_green_view(
+                    parent=self,
+                    hole_row=self.hole_row,
+                    gc_center_lat=self.gc_center_lat,
+                    gc_center_lng=self.gc_center_lng,
+                    cur_lat=self.cur_lat,
+                    cur_lng=self.cur_lng,
+                    selected_green=self.selected_green,
+                )
+            elif hasattr(green_view, "main"):
+                green_view.main()
+            else:
+                print(
+                    "[DistanceWindow] green_view 모듈에 실행용 엔트리 함수 "
+                    "(open_green_view_window / open_green_view / main) 가 없습니다."
+                )
+        except Exception as e:
+            print("[DistanceWindow] green_view 실행 중 오류:", e)
 
 
 def open_distance_window(
