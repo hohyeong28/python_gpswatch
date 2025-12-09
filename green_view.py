@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from pyproj import CRS, Transformer
 
-from config import LCD_WIDTH, LCD_HEIGHT  # 466 x 466 사용
+from config import LCD_WIDTH, LCD_HEIGHT  # 예: 466 x 466
 
 
 # ---------------- 공용 유틸 ---------------- #
@@ -104,7 +104,7 @@ def segment_line_intersection(
 
 class GreenViewWindow(tk.Toplevel):
     """
-    - 현재 홀의 그린 컨투어(LG/RG)와 핀 위치를 회전/스케일링해서 보여주는 창
+    - 현재 홀의 그린 컨투어(LG/RG)와 pin_position을 회전/스케일링해서 보여주는 창
     - 입력:
         * hole_row: DB 한 행 (LG/RG, LG1~20/RG1~20, T3/IP1/IP2 ENU 포함)
         * gc_center_lat/lng: ENU 변환을 위한 GC 중심 WGS84
@@ -288,7 +288,7 @@ class GreenViewWindow(tk.Toplevel):
             return (x * cos_t - y * sin_t, x * sin_t + y * cos_t)
 
         G_rot = [rot(p) for p in Gpts_rel]
-        origin_rot = rot(origin_rel)
+        origin_rot = rot(origin_rel)  # 현재는 사용 안 하지만 남겨둠
         cur_rot = rot(cur_rel)
         pin_rot = rot(pin_rel)
 
@@ -403,7 +403,7 @@ class GreenViewWindow(tk.Toplevel):
 
         # 6) 화면에 그리기
 
-        # 그린 컨투어
+        # 6-1) 그린 컨투어
         contour_screen = []
         for p in G_rot:
             contour_screen.extend(world_to_screen(p))
@@ -414,7 +414,7 @@ class GreenViewWindow(tk.Toplevel):
             width=3,
         )
 
-        # 핀 위치 (빨간 점)
+        # 6-2) 핀 위치 (빨간 점)
         pin_s = world_to_screen(pin_rot)
         self.canvas.create_oval(
             pin_s[0] - 4,
@@ -425,9 +425,7 @@ class GreenViewWindow(tk.Toplevel):
             outline="red",
         )
 
-        # --- 핀 중심 기준 십자 점선 (컨투어 밖으로 나가지 않음) ---
-
-        # 길이 축: len_p1 ~ len_p2
+        # 6-3) 핀 중심 기준 십자 점선 (컨투어 밖으로 나가지 않음)
         len1_s = world_to_screen(len_p1)
         len2_s = world_to_screen(len_p2)
         self.canvas.create_line(
@@ -440,7 +438,6 @@ class GreenViewWindow(tk.Toplevel):
             width=2,
         )
 
-        # 폭 축: p3 ~ p4
         p3_s = world_to_screen(p3)
         p4_s = world_to_screen(p4)
         self.canvas.create_line(
@@ -453,12 +450,10 @@ class GreenViewWindow(tk.Toplevel):
             width=2,
         )
 
-        # --- 엔트리 삼각형 (front edge 위치, 핀 방향) ---
-
+        # 6-4) 엔트리 삼각형: front edge 위치에 삼각형 (핀 방향)
         pf_s = world_to_screen(p_front)
         tip = pf_s
 
-        # 방향: front → pin
         dir_tri = (pin_s[0] - tip[0], pin_s[1] - tip[1])
         norm_tri = math.hypot(dir_tri[0], dir_tri[1])
         if norm_tri == 0:
@@ -467,14 +462,12 @@ class GreenViewWindow(tk.Toplevel):
         dtx = dir_tri[0] / norm_tri
         dty = dir_tri[1] / norm_tri
 
-        # 수직 벡터 (좌우 폭)
         pxv = -dty
         pyv = dtx
 
-        tri_len = 18  # tip에서 밑변까지 거리
-        tri_width = 16  # 밑변 폭
+        tri_len = 18
+        tri_width = 16
 
-        # 밑변 중심: tip에서 pin의 반대 방향으로 tri_len만큼
         base_center = (tip[0] - dtx * tri_len, tip[1] - dty * tri_len)
 
         left = (
@@ -491,7 +484,7 @@ class GreenViewWindow(tk.Toplevel):
             outline="red",
         )
 
-        # entry_distance 텍스트: 삼각형 아래쪽
+        # 6-5) entry_distance 텍스트: 삼각형 아래쪽
         text_y = max(tip[1], left[1], right[1]) + 50
         self.canvas.create_text(
             cx,
@@ -501,7 +494,7 @@ class GreenViewWindow(tk.Toplevel):
             font=("Helvetica", 32, "bold"),
         )
 
-        # 상단/우측에 green_pin_length / green_pin_width 숫자
+        # 6-6) 상단/우측 숫자 + 홀/파 정보
         radius = LCD_WIDTH / 2
         self.canvas.create_text(
             cx,
@@ -518,7 +511,6 @@ class GreenViewWindow(tk.Toplevel):
             font=("Helvetica", 26, "bold"),
         )
 
-        # 홀/파 정보 (좌측)
         hole = int(self.hole_row.get("Hole", 0))
         par = int(self.hole_row.get("PAR", 0))
         self.canvas.create_text(
