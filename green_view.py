@@ -347,26 +347,48 @@ class GreenViewWindow(tk.Toplevel):
             p_back = distances[-1][1]
 
         entry_distance = dist(P0, p_front)
-        green_pin_length = dist(p_front, p_back)
 
-        # 5) green_pin_width: p1-p2 직선에 수직이고 pin_position 을 지나는 직선과의 교차
+        # 5) green_pin_length / green_pin_width:
+        #    - 길이 축: p_front-p_back 방향(a_dir)과 평행하면서 pin_position을 지나는 직선 ∩ 컨투어
+        #    - 폭   축: 위 직선에 수직이면서 pin_position을 지나는 직선 ∩ 컨투어
         a = (p_back[0] - p_front[0], p_back[1] - p_front[1])
         a_norm = math.hypot(a[0], a[1])
         if a_norm == 0:
+            # degenerate: 길이/폭 계산 불가
+            green_pin_length = 0.0
             width_val = 0.0
+            len_p1 = len_p2 = Pin
             p3 = p4 = Pin
         else:
-            a_dir = (a[0] / a_norm, a[1] / a_norm)
-            # 수직 방향 벡터
-            perp = (-a_dir[1], a_dir[0])
-            line_P = Pin
-            line_d = perp
+            a_dir = (a[0] / a_norm, a[1] / a_norm)  # 길이축 방향 (front-back 방향)
+            perp = (-a_dir[1], a_dir[0])  # 폭축 방향 (수직)
 
+            # 5-1) 길이 축: line(Pin, a_dir) ∩ polygon
+            length_inters: List[Tuple[Tuple[float, float], float]] = []
+            for i in range(len(G_rot)):
+                A = G_rot[i]
+                B = G_rot[(i + 1) % len(G_rot)]
+                res = segment_line_intersection(A, B, Pin, a_dir)
+                if res is not None:
+                    length_inters.append(res)
+
+            if len(length_inters) >= 2:
+                length_inters.sort(key=lambda x: x[1])  # t 기준 정렬
+                len_p1 = length_inters[0][0]
+                len_p2 = length_inters[-1][0]
+            else:
+                # 교차가 부족하면 기존 front/back을 fallback으로 사용
+                len_p1 = p_front
+                len_p2 = p_back
+
+            green_pin_length = dist(len_p1, len_p2)
+
+            # 5-2) 폭 축: line(Pin, perp) ∩ polygon
             width_inters: List[Tuple[Tuple[float, float], float]] = []
             for i in range(len(G_rot)):
                 A = G_rot[i]
                 B = G_rot[(i + 1) % len(G_rot)]
-                res = segment_line_intersection(A, B, line_P, line_d)
+                res = segment_line_intersection(A, B, Pin, perp)
                 if res is not None:
                     width_inters.append(res)
 
@@ -403,60 +425,37 @@ class GreenViewWindow(tk.Toplevel):
             outline="red",
         )
 
-        # front/back, width 교차선의 화면 좌표 (p_front/p_back, p3/p4)
-        pf_s = world_to_screen(p_front)
-        pb_s = world_to_screen(p_back)
+        # --- 핀 중심 기준 십자 점선 (컨투어 밖으로 나가지 않음) ---
+
+        # 길이 축: len_p1 ~ len_p2
+        len1_s = world_to_screen(len_p1)
+        len2_s = world_to_screen(len_p2)
+        self.canvas.create_line(
+            len1_s[0],
+            len1_s[1],
+            len2_s[0],
+            len2_s[1],
+            fill="red",
+            dash=(4, 4),
+            width=2,
+        )
+
+        # 폭 축: p3 ~ p4
         p3_s = world_to_screen(p3)
         p4_s = world_to_screen(p4)
-
-        # --- 핀 중심 기준 십자 점선 추가 ---
-        # 1) 세로 축(핀 방향: front-back 방향과 평행, pin_position을 지나는 점선)
-        fb_dx = pb_s[0] - pf_s[0]
-        fb_dy = pb_s[1] - pf_s[1]
-        fb_norm = math.hypot(fb_dx, fb_dy)
-        if fb_norm == 0:
-            fb_dx, fb_dy = 0.0, -1.0
-            fb_norm = 1.0
-        fb_dx /= fb_norm
-        fb_dy /= fb_norm
-
-        L = LCD_WIDTH  # 충분히 크게 뻗어서 원 전체를 가로지르게
-        v1 = (pin_s[0] - fb_dx * L, pin_s[1] - fb_dy * L)
-        v2 = (pin_s[0] + fb_dx * L, pin_s[1] + fb_dy * L)
         self.canvas.create_line(
-            v1[0],
-            v1[1],
-            v2[0],
-            v2[1],
+            p3_s[0],
+            p3_s[1],
+            p4_s[0],
+            p4_s[1],
             fill="red",
             dash=(4, 4),
             width=2,
         )
 
-        # 2) 가로 축(폭 방향: p3-p4 방향과 평행, pin_position을 지나는 점선)
-        w_dx = p4_s[0] - p3_s[0]
-        w_dy = p4_s[1] - p3_s[1]
-        w_norm = math.hypot(w_dx, w_dy)
-        if w_norm == 0:
-            w_dx, w_dy = 1.0, 0.0
-            w_norm = 1.0
-        w_dx /= w_norm
-        w_dy /= w_norm
+        # --- 엔트리 삼각형 (front edge 위치, 핀 방향) ---
 
-        h1 = (pin_s[0] - w_dx * L, pin_s[1] - w_dy * L)
-        h2 = (pin_s[0] + w_dx * L, pin_s[1] + w_dy * L)
-        self.canvas.create_line(
-            h1[0],
-            h1[1],
-            h2[0],
-            h2[1],
-            fill="red",
-            dash=(4, 4),
-            width=2,
-        )
-        # --- 십자 점선 끝 ---
-
-        # 엔트리 삼각형: front edge 위치에 삼각형 (그린 쪽을 향하도록)
+        pf_s = world_to_screen(p_front)
         tip = pf_s
 
         # 방향: front → pin
