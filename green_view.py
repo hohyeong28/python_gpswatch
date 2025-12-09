@@ -287,7 +287,7 @@ class GreenViewWindow(tk.Toplevel):
             angle_v = 0.0
         else:
             angle_v = math.atan2(v[1], v[0])  # y, x (수학 좌표, y↑)
-        target_angle = -math.pi / 2  # (0, -1) 방향 = 12시
+        target_angle = math.pi / 2  # (0, -1) 방향 = 12시
         theta = target_angle - angle_v
 
         cos_t = math.cos(theta)

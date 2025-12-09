@@ -27,7 +27,7 @@ from simul_gps import GPSSimulator
 
 threshold_dist = 20
 
-sim_gps_file = "안양CC.xlsx"
+sim_gps_file = "남서울CC.xlsx"
 
 # -------------------- Haversine 거리 계산 -------------------- #
 
