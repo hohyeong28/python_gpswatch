@@ -308,8 +308,8 @@ class PlayGolfWindow(tk.Toplevel):
 
         print("[PlayGolf] 티박스로 이동 안내 표시")
 
-        # 3초 후 현재 홀 인식 루프 시작
-        self.after(3000, self.start_find_1st_hole_loop)
+        # 1초 후 현재 홀 인식 루프 시작
+        self.after(1000, self.start_find_1st_hole_loop)
 
     # ---------- 골프장 찾기 (find_GC) ---------- #
 
