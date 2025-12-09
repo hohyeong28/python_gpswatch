@@ -1,3 +1,21 @@
+# green_view.py
+#
+# - 현재 홀의 그린 컨투어(LG/RG)와 pin_position을 회전/스케일링해서 보여주는 창
+# - DistanceWindow 에서 open_green_view_window(...) 로 호출하여 사용
+# - 요구사항:
+#   1) 골퍼의 위치는 화면 기준 6시 방향(아래) 쪽에 위치하도록 회전
+#   2) entry(front) 포인트는 골퍼 → 핀 방향으로 쏜 직선이 그린과 처음 만나는 점
+#      → 화면에서는 6시 방향 에지에 삼각형 표시
+#   3) entry_distance 는 measure_distance.py 의 front 와 “동일 로직”으로 계산
+#      (dist_mode = 직선/보정, 고도 보정, 단위 변환까지 동일)
+#   4) green_pin_length(길이) / width(폭)는 각각 상단, 우측에 표시
+#   5) Hole / PAR 정보는 좌측에 표시
+#   6) STOP 버튼:
+#        - (400, 400) 좌표에 "STOP" 버튼
+#        - 클릭 시 GreenViewWindow 를 닫고, 부모(DistanceWindow)를 다시 포커스
+#   7) 현재 위치(위도/경도)는 DistanceWindow 에서 계속 갱신되며,
+#      GreenViewWindow 는 1초마다 부모로부터 위치를 읽어와 화면을 재계산한다.
+
 import math
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
@@ -9,7 +27,8 @@ import numpy as np
 import pandas as pd
 from pyproj import CRS, Transformer
 
-from config import LCD_WIDTH, LCD_HEIGHT  # 예: 466 x 466
+from config import LCD_WIDTH, LCD_HEIGHT
+from setting import app_settings
 
 
 # ---------------- 공용 유틸 ---------------- #
@@ -103,19 +122,6 @@ def segment_line_intersection(
 # ---------------- Green View Window ---------------- #
 
 class GreenViewWindow(tk.Toplevel):
-    """
-    - 현재 홀의 그린 컨투어(LG/RG)와 pin_position을 회전/스케일링해서 보여주는 창
-    - 입력:
-        * hole_row: DB 한 행 (LG/RG, LG1~20/RG1~20, T3/IP1/IP2 ENU 포함)
-        * gc_center_lat/lng: ENU 변환을 위한 GC 중심 WGS84
-        * cur_lat/lng: 현재 위치 WGS84
-        * selected_green: 'L' or 'R'
-      (pin_position 은 일단 center(LG 또는 RG)로 설정, 나중에 별도 값을 쓸 수 있음)
-    - STOP 버튼:
-        * (400, 400) 위치에 "STOP" 버튼 추가
-        * 클릭 시 이 GreenViewWindow 를 닫고, 부모(예: DistanceWindow)로 복귀
-    """
-
     def __init__(
         self,
         parent: tk.Tk,
@@ -171,17 +177,20 @@ class GreenViewWindow(tk.Toplevel):
             print("[GreenView] transformer 생성 실패")
             return
 
-        # 현재 위치 ENU
+        # 현재 위치 ENU (초기값)
         self.E_cur, self.N_cur = self.tf.transform(self.cur_lng, self.cur_lat)
 
-        # 데이터 추출
-        self.center_EN = self._get_green_center()
-        self.pin_EN = self._get_pin_position()  # 최초에는 center와 동일
+        # 데이터 추출 (DB 기반)
+        self.center_EN, self.center_alt = self._get_green_center_and_alt()
+        self.pin_EN = self._get_pin_position()  # 현재는 center와 동일
         self.green_points = self._get_green_points()
         self.origin_EN = self._get_origin_point()
 
-        # 기하 계산 (world → rotated → screen)
+        # 첫 렌더
         self._compute_geometry_and_draw()
+
+        # 주기적 위치/화면 갱신 (1초마다)
+        self.after(1000, self._auto_update_loop)
 
     # --------- DB 필드 접근 --------- #
 
@@ -192,28 +201,37 @@ class GreenViewWindow(tk.Toplevel):
             return None
         return float(e), float(n)
 
-    def _get_green_center(self) -> Tuple[float, float]:
+    def _get_green_center_and_alt(self) -> Tuple[Tuple[float, float], float]:
         if self.selected_green == "L":
             label = "LG"
         else:
             label = "RG"
+
+        # center ENU
         p = self._get_EN_point(label)
         if p is not None:
-            return p
-        # center 필드가 없으면 에지 평균으로 대체
-        pts = self._get_green_points()
-        if pts:
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            return (sum(xs) / len(xs), sum(ys) / len(ys))
-        # 마지막 fallback: 현재 위치
-        return self.E_cur, self.N_cur
+            center_en = p
+        else:
+            pts = self._get_green_points()
+            if pts:
+                xs = [q[0] for q in pts]
+                ys = [q[1] for q in pts]
+                center_en = (sum(xs) / len(xs), sum(ys) / len(ys))
+            else:
+                center_en = (self.E_cur, self.N_cur)
+
+        # center altitude
+        if self.selected_green == "L":
+            a = self.hole_row.get("LG_dAlt", np.nan)
+        else:
+            a = self.hole_row.get("RG_dAlt", np.nan)
+        if pd.isna(a):
+            a = 0.0
+
+        return center_en, float(a)
 
     def _get_pin_position(self) -> Tuple[float, float]:
-        """
-        나중에 핀 위치가 별도 필드/설정으로 주어지면 여기서 사용.
-        현재는 center와 동일하게 사용.
-        """
+        # 나중에 핀 위치가 별도 필드/설정으로 주어지면 여기서 변경
         return self.center_EN
 
     def _get_green_points(self) -> List[Tuple[float, float]]:
@@ -226,18 +244,51 @@ class GreenViewWindow(tk.Toplevel):
         return pts
 
     def _get_origin_point(self) -> Tuple[float, float]:
-        """
-        원점 ENU:
-          - IP2 존재 시: IP2
-          - 그 외, IP1 존재 시: IP1
-          - 그 외, T3 존재 시: T3
-          - 모두 없으면 현재 위치 사용
-        """
         for label in ["IP2", "IP1", "T3"]:
             p = self._get_EN_point(label)
             if p is not None:
                 return p
         return self.E_cur, self.N_cur
+
+    # --------- 위치 갱신 --------- #
+
+    def _update_current_position(self):
+        """
+        부모(DistanceWindow 또는 상위 객체)에서 현재 위치(lat/lng)를 읽어와
+        self.cur_lat / self.cur_lng 및 ENU(self.E_cur / self.N_cur)를 갱신.
+        """
+        lat = None
+        lng = None
+
+        # 1순위: DistanceWindow 가 cur_lat / cur_lng 를 유지하는 경우
+        if hasattr(self.parent_window, "cur_lat") and hasattr(self.parent_window, "cur_lng"):
+            lat = getattr(self.parent_window, "cur_lat")
+            lng = getattr(self.parent_window, "cur_lng")
+
+        # 2순위: DistanceWindow.parent_window(PlayGolfWindow)의 latitude/longitude
+        if (lat is None or lng is None) and hasattr(self.parent_window, "parent_window"):
+            pg = getattr(self.parent_window, "parent_window")
+            if hasattr(pg, "latitude") and hasattr(pg, "longitude"):
+                lat = getattr(pg, "latitude")
+                lng = getattr(pg, "longitude")
+
+        # 3순위: 기존 값 유지
+        if lat is None or lng is None:
+            lat = self.cur_lat
+            lng = self.cur_lng
+
+        self.cur_lat = lat
+        self.cur_lng = lng
+
+        if self.tf is not None:
+            self.E_cur, self.N_cur = self.tf.transform(self.cur_lng, self.cur_lat)
+
+    def _auto_update_loop(self):
+        if not self.winfo_exists():
+            return
+        self._update_current_position()
+        self._compute_geometry_and_draw()
+        self.after(1000, self._auto_update_loop)
 
     # --------- 이미지 로드 --------- #
 
@@ -260,6 +311,8 @@ class GreenViewWindow(tk.Toplevel):
     # --------- 주 계산 & 그리기 --------- #
 
     def _compute_geometry_and_draw(self):
+        self.canvas.delete("all")
+
         # 배경
         try:
             bg = self.load_image("background.png", size=(LCD_WIDTH, LCD_HEIGHT))
@@ -287,7 +340,7 @@ class GreenViewWindow(tk.Toplevel):
             angle_v = 0.0
         else:
             angle_v = math.atan2(v[1], v[0])  # y, x (수학 좌표, y↑)
-        target_angle = math.pi / 2  # (0, -1) 방향 = 12시
+        target_angle = math.pi / 2  # (0, 1) 방향 = 12시
         theta = target_angle - angle_v
 
         cos_t = math.cos(theta)
@@ -298,7 +351,7 @@ class GreenViewWindow(tk.Toplevel):
             return (x * cos_t - y * sin_t, x * sin_t + y * cos_t)
 
         G_rot = [rot(p) for p in Gpts_rel]
-        origin_rot = rot(origin_rel)  # 현재는 사용 안 하지만 남겨둠
+        origin_rot = rot(origin_rel)
         cur_rot = rot(cur_rel)
         pin_rot = rot(pin_rel)
 
@@ -314,23 +367,23 @@ class GreenViewWindow(tk.Toplevel):
         else:
             scale = min(234.0 / width, 234.0 / height)
 
-        # 화면 중심
         cx = LCD_WIDTH / 2
         cy = LCD_HEIGHT / 2
 
         def world_to_screen(p):
             x, y = p
             sx = cx + x * scale
-            sy = cy - y * scale  # y축 반전
+            sy = cy - y * scale
             return sx, sy
 
-        # 4) entry/front/back(p1,p2) 계산: P0 → pin 방향 ray와 그린 컨투어 교차
-        P0 = cur_rot  # 회전 후 현재 위치
+        # 4) entry/front/back 계산
+        P0 = cur_rot
         Pin = pin_rot
+
         dir_vec = (Pin[0] - P0[0], Pin[1] - P0[1])
         norm = math.hypot(dir_vec[0], dir_vec[1])
         if norm == 0:
-            dir_vec = (0.0, -1.0)
+            dir_vec = (0.0, 1.0)
         else:
             dir_vec = (dir_vec[0] / norm, dir_vec[1] / norm)
 
@@ -343,37 +396,64 @@ class GreenViewWindow(tk.Toplevel):
                 intersections.append(res)
 
         if len(intersections) >= 2:
-            intersections.sort(key=lambda x: x[1])  # t 기준 정렬
+            intersections.sort(key=lambda x: x[1])
             p_front = intersections[0][0]
             p_back = intersections[-1][0]
         elif len(intersections) == 1:
             p_front = intersections[0][0]
             p_back = intersections[0][0]
         else:
-            # 교차 없을 때는 핀과 가장 가까운 점들로 fallback
             distances = [(dist(Pin, p), p) for p in G_rot]
             distances.sort(key=lambda x: x[0])
             p_front = distances[0][1]
             p_back = distances[-1][1]
 
-        entry_distance = dist(P0, p_front)
+        # 평면 거리 (회전 후이지만 길이는 동일)
+        flat_entry = dist(P0, p_front)
+        flat_center = dist(P0, Pin)
 
-        # 5) green_pin_length / green_pin_width:
-        #    - 길이 축: p_front-p_back 방향(a_dir)과 평행하면서 pin_position을 지나는 직선 ∩ 컨투어
-        #    - 폭   축: 위 직선에 수직이면서 pin_position을 지나는 직선 ∩ 컨투어
+        # 5) measure_distance 와 동일 로직으로 entry_distance 계산
+        # 고도 정보: center_alt vs current_alt
+        # DistanceWindow.parent_window (PlayGolfWindow)에 altitude / alt_offset 이 있다고 가정
+        pg = getattr(self.parent_window, "parent_window", self.parent_window)
+        parent_alt = getattr(pg, "altitude", 0.0)
+        alt_offset = getattr(pg, "alt_offset", 0.0)
+        current_alt = parent_alt - alt_offset
+
+        diff_h = self.center_alt - current_alt
+
+        dist_mode = getattr(app_settings, "dist_mode", "직선")
+
+        if dist_mode == "보정":
+            eDist = flat_center + diff_h
+            if eDist < 80:
+                eDist_clamped = 80.0
+            elif eDist > 220:
+                eDist_clamped = 220.0
+            else:
+                eDist_clamped = eDist
+
+            landing = -0.11 * eDist_clamped + 64.0
+            landing_rad = math.radians(landing) if landing != 0 else 1e-6
+
+            extended_dist = diff_h / math.tan(landing_rad)
+
+            entry_distance = flat_entry + extended_dist
+        else:
+            entry_distance = math.sqrt(flat_entry * flat_entry + diff_h * diff_h)
+
+        # green_pin_length / width 는 평면 거리 그대로 사용
         a = (p_back[0] - p_front[0], p_back[1] - p_front[1])
         a_norm = math.hypot(a[0], a[1])
         if a_norm == 0:
-            # degenerate: 길이/폭 계산 불가
             green_pin_length = 0.0
             width_val = 0.0
             len_p1 = len_p2 = Pin
             p3 = p4 = Pin
         else:
-            a_dir = (a[0] / a_norm, a[1] / a_norm)  # 길이축 방향 (front-back 방향)
-            perp = (-a_dir[1], a_dir[0])  # 폭축 방향 (수직)
+            a_dir = (a[0] / a_norm, a[1] / a_norm)
+            perp = (-a_dir[1], a_dir[0])
 
-            # 5-1) 길이 축: line(Pin, a_dir) ∩ polygon
             length_inters: List[Tuple[Tuple[float, float], float]] = []
             for i in range(len(G_rot)):
                 A = G_rot[i]
@@ -383,17 +463,15 @@ class GreenViewWindow(tk.Toplevel):
                     length_inters.append(res)
 
             if len(length_inters) >= 2:
-                length_inters.sort(key=lambda x: x[1])  # t 기준 정렬
+                length_inters.sort(key=lambda x: x[1])
                 len_p1 = length_inters[0][0]
                 len_p2 = length_inters[-1][0]
             else:
-                # 교차가 부족하면 기존 front/back을 fallback으로 사용
                 len_p1 = p_front
                 len_p2 = p_back
 
             green_pin_length = dist(len_p1, len_p2)
 
-            # 5-2) 폭 축: line(Pin, perp) ∩ polygon
             width_inters: List[Tuple[Tuple[float, float], float]] = []
             for i in range(len(G_rot)):
                 A = G_rot[i]
@@ -411,20 +489,28 @@ class GreenViewWindow(tk.Toplevel):
                 width_val = 0.0
                 p3 = p4 = Pin
 
-        # 6) 화면에 그리기
+        # 6) 단위 변환 (M / Yd) – measure_distance 와 동일
+        unit = getattr(app_settings, "unit", "M")
+        conv = 1.0
+        if unit == "Yd":
+            conv = 1.09361
 
-        # 6-1) 그린 컨투어
+        entry_display = int(round(entry_distance * conv))
+        length_display = int(round(green_pin_length * conv))
+        width_display = int(round(width_val * conv))
+
+        # 7) 화면에 그리기
+
         contour_screen = []
         for p in G_rot:
             contour_screen.extend(world_to_screen(p))
         self.canvas.create_polygon(
             contour_screen,
-            fill="#90EE90",  # 연두색
+            fill="#90EE90",
             outline="white",
             width=3,
         )
 
-        # 6-2) 핀 위치 (빨간 점)
         pin_s = world_to_screen(pin_rot)
         self.canvas.create_oval(
             pin_s[0] - 4,
@@ -435,7 +521,6 @@ class GreenViewWindow(tk.Toplevel):
             outline="red",
         )
 
-        # 6-3) 핀 중심 기준 십자 점선 (컨투어 밖으로 나가지 않음)
         len1_s = world_to_screen(len_p1)
         len2_s = world_to_screen(len_p2)
         self.canvas.create_line(
@@ -460,7 +545,6 @@ class GreenViewWindow(tk.Toplevel):
             width=2,
         )
 
-        # 6-4) 엔트리 삼각형: front edge 위치에 삼각형 (핀 방향)
         pf_s = world_to_screen(p_front)
         tip = pf_s
 
@@ -494,29 +578,27 @@ class GreenViewWindow(tk.Toplevel):
             outline="red",
         )
 
-        # 6-5) entry_distance 텍스트: 삼각형 아래쪽
-        text_y = max(tip[1], left[1], right[1]) + 50
+        text_y = max(tip[1], left[1], right[1]) + 30
         self.canvas.create_text(
             cx,
             text_y,
-            text=f"{int(round(entry_distance))}",
+            text=f"{entry_display}",
             fill="white",
             font=("Helvetica", 32, "bold"),
         )
 
-        # 6-6) 상단/우측 숫자 + 홀/파 정보
         radius = LCD_WIDTH / 2
         self.canvas.create_text(
             cx,
             cy - radius + 80,
-            text=f"{int(round(green_pin_length))}",
+            text=f"{length_display}",
             fill="white",
             font=("Helvetica", 26, "bold"),
         )
         self.canvas.create_text(
             cx + radius - 80,
             cy,
-            text=f"{int(round(width_val))}",
+            text=f"{width_display}",
             fill="white",
             font=("Helvetica", 26, "bold"),
         )
@@ -538,7 +620,6 @@ class GreenViewWindow(tk.Toplevel):
             font=("Helvetica", 22, "bold"),
         )
 
-        # 6-7) STOP 버튼: (400, 400) 위치에 표시
         self.canvas.create_window(
             400,
             400,
@@ -548,11 +629,6 @@ class GreenViewWindow(tk.Toplevel):
     # --------- STOP 버튼 핸들러 --------- #
 
     def _on_stop(self):
-        """
-        STOP 버튼 클릭 시:
-          - 이 GreenViewWindow 를 닫고
-          - 부모(예: DistanceWindow)를 다시 전면으로 올리고 포커스를 준다.
-        """
         try:
             parent = self.parent_window
             self.destroy()
@@ -577,10 +653,6 @@ def open_green_view_window(
     cur_lng: float,
     selected_green: str = "L",
 ) -> GreenViewWindow:
-    """
-    DistanceWindow (또는 PlayGolfWindow) 등에서 GreenViewWindow 를 열기 위한
-    공식 엔트리 함수.
-    """
     return GreenViewWindow(
         parent=parent,
         hole_row=hole_row,
@@ -590,51 +662,3 @@ def open_green_view_window(
         cur_lng=cur_lng,
         selected_green=selected_green,
     )
-
-
-# ---------------- 단독 테스트 ---------------- #
-
-if __name__ == "__main__":
-    # 간단한 dummy 데이터로 모양/동작만 확인용
-    root = tk.Tk()
-    root.title("Green View Test")
-
-    # ENU 기준 대략적인 타원형 그린 생성 (LG1~LG20)
-    pts = []
-    a, b = 25, 15  # m 단위 타원 반지름
-    for k in range(20):
-        t = 2 * math.pi * k / 20
-        x = a * math.cos(t)
-        y = b * math.sin(t)
-        pts.append((x, y))
-
-    data = {
-        "Hole": 10,
-        "PAR": 4,
-        "LG_E": 0.0,
-        "LG_N": 0.0,
-    }
-    for i, (x, y) in enumerate(pts, start=1):
-        data[f"LG{i}_E"] = x
-        data[f"LG{i}_N"] = y
-
-    # IP2(원점)과 현재 위치를 그린 아래쪽에 배치
-    data["IP2_E"] = 0.0
-    data["IP2_N"] = -60.0  # 그린 아래쪽 60m 지점
-    hole_row = pd.Series(data)
-
-    # WGS84 는 테스트용 dummy, ENU 변환만 필요하므로 가까운 값 사용
-    gc_lat, gc_lng = 37.34, 126.94
-    cur_lat, cur_lng = 37.3401, 126.9401  # 현재 위치
-
-    win = open_green_view_window(
-        parent=root,
-        hole_row=hole_row,
-        gc_center_lat=gc_lat,
-        gc_center_lng=gc_lng,
-        cur_lat=cur_lat,
-        cur_lng=cur_lng,
-        selected_green="L",
-    )
-
-    root.mainloop()
