@@ -7,6 +7,10 @@
 # - entry_distance/길이/폭/엔트리 삼각형은 pin_EN 기준
 # - entry_display <= 20이면 "그린 근처입니다" 1초 표시 후 자동 복귀
 # - 단독 실행 코드 없음
+#
+# [반영]
+# - DistanceScreen에서 전달된 selected_green(L/R) 표시
+# - 그린 contour를 더 부드럽게: (각도 정렬) + Chaikin 스무딩(iterations=2)
 
 import math
 from pathlib import Path
@@ -114,6 +118,34 @@ def is_point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) 
             if x_int > x:
                 inside = not inside
     return inside
+
+
+def sort_points_by_angle(points: List[Tuple[float, float]], center: Tuple[float, float]) -> List[Tuple[float, float]]:
+    cx, cy = center
+    return sorted(points, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+
+
+def chaikin_smooth_closed(points: List[Tuple[float, float]], iterations: int = 2) -> List[Tuple[float, float]]:
+    """
+    Chaikin corner-cutting for a closed polyline.
+    - iterations=2 적용
+    """
+    if len(points) < 3:
+        return points
+
+    pts = points[:]
+    for _ in range(iterations):
+        new_pts: List[Tuple[float, float]] = []
+        n = len(pts)
+        for i in range(n):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % n]
+            q = (0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1])
+            r = (0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1])
+            new_pts.append(q)
+            new_pts.append(r)
+        pts = new_pts
+    return pts
 
 
 class GreenViewScreen(tk.Frame):
@@ -266,6 +298,13 @@ class GreenViewScreen(tk.Frame):
                 pts.append(p)
         return pts
 
+    def _check_rg_exists(self) -> bool:
+        if self.hole_row is None:
+            return False
+        rg_e = self.hole_row.get("RG_E", np.nan)
+        rg_n = self.hole_row.get("RG_N", np.nan)
+        return not (pd.isna(rg_e) or pd.isna(rg_n))
+
     # ---------- images ---------- #
 
     def load_image(self, filename: str, size: Optional[Tuple[int, int]] = None):
@@ -281,6 +320,28 @@ class GreenViewScreen(tk.Frame):
         photo = ImageTk.PhotoImage(img)
         self.images[key] = photo
         return photo
+
+    # ---------- L/R indicator ---------- #
+
+    def _draw_green_indicator(self):
+        """
+        DistanceScreen에서 전달된 selected_green(L/R)을 표시한다.
+        RG가 없는 홀은 의미상 L만 표시.
+        """
+        has_rg = self._check_rg_exists()
+        label = self.selected_green if has_rg else "L"
+
+        # 표시 위치/크기 (필요 시 조정)
+        cx, cy = 105, 145
+        r = 22
+        self.canvas.create_oval(
+            cx - r, cy - r, cx + r, cy + r,
+            fill="#2E7D32", outline="#1B5E20", width=3
+        )
+        self.canvas.create_text(
+            cx, cy, text=label,
+            fill="white", font=("Helvetica", 18, "bold")
+        )
 
     # ---------- click pin ---------- #
 
@@ -319,6 +380,9 @@ class GreenViewScreen(tk.Frame):
         except FileNotFoundError:
             pass
 
+        # L/R 표시 (배경 위)
+        self._draw_green_indicator()
+
         if not self.green_points:
             return
 
@@ -342,9 +406,14 @@ class GreenViewScreen(tk.Frame):
             x, y = p
             return (x * cos_t - y * sin_t, x * sin_t + y * cos_t)
 
-        G_rot = [rot(p) for p in G_rel]
+        # 회전 좌표계로 변환
+        G_rot_raw = [rot(p) for p in G_rel]
         cur_rot = rot(cur_rel)
         pin_rot = rot(pin_rel)
+
+        # contour 부드럽게: 각도 정렬 + Chaikin(iterations=2)
+        G_rot_sorted = sort_points_by_angle(G_rot_raw, center=(0.0, 0.0))
+        G_rot = chaikin_smooth_closed(G_rot_sorted, iterations=2)
 
         # scale
         xs = [p[0] for p in G_rot]
@@ -467,7 +536,7 @@ class GreenViewScreen(tk.Frame):
         length_display = int(round(green_pin_length * conv))
         width_display = int(round(width_val * conv))
 
-        # draw contour
+        # draw contour (smooth)
         contour = []
         for p in G_rot:
             sx, sy = to_screen(p)
@@ -501,9 +570,15 @@ class GreenViewScreen(tk.Frame):
         right = (base_center[0] - pxv * (tri_width / 2), base_center[1] - pyv * (tri_width / 2))
         self.canvas.create_polygon([tip[0], tip[1], left[0], left[1], right[0], right[1]], fill="red", outline="red")
 
-        # entry text below triangle
-        text_y = max(tip[1], left[1], right[1]) + 30
-        self.canvas.create_text(cx, text_y, text=f"{entry_display}", fill="white", font=("Helvetica", 32, "bold"))
+        # entry text (fixed HUD position)
+        entry_text_x = cx
+        entry_text_y = 400  # 원하는 고정 위치로 조정 (예: 상단 바 아래)
+        self.canvas.create_text(
+            entry_text_x, entry_text_y,
+            text=f"{entry_display}",
+            fill="white",
+            font=("Helvetica", 32, "bold")
+        )
 
         # top/right numbers
         radius = LCD_WIDTH / 2
