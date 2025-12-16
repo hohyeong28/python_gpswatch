@@ -5,7 +5,8 @@
 # - 외부에서 set_context(...)로 초기화 후 start() 호출 형태
 # - GreenView / Putt 전환은 콜백(on_open_green_view, on_open_putt)으로 처리
 # - LayupView 전환 콜백(on_open_layup_view) 추가
-# - [추가] Settings 전환 콜백(on_open_settings) 추가
+# - Settings 전환 콜백(on_open_settings) 추가
+# - Scorecard 전환 콜백(on_open_scorecard) 추가
 # - 단독 실행 코드 제거
 
 import math
@@ -23,6 +24,8 @@ from config import LCD_WIDTH, LCD_HEIGHT
 from setting import app_settings
 
 
+# -------------------- 좌표 변환 / 거리 유틸 -------------------- #
+
 def make_transformer(lat0: float, lon0: float) -> Optional[Transformer]:
     if np.isnan(lat0) or np.isnan(lon0):
         return None
@@ -30,23 +33,26 @@ def make_transformer(lat0: float, lon0: float) -> Optional[Transformer]:
     aeqd = CRS.from_proj4(
         f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +datum=WGS84 +units=m"
     )
-    return Transformer.from_crs(wgs84, aeqd, always_xy=True)
+    return Transformer.from_crs(wgs84, aeqd, always_xy=True)  # (lon, lat) → (E, N)
 
 
 def euclidean_dist(p: Tuple[float, float], q: Tuple[float, float]) -> float:
     return math.hypot(p[0] - q[0], p[1] - q[1])
 
 
+# -------------------- Distance Screen -------------------- #
+
 class DistanceScreen(tk.Frame):
     """
     단일 윈도우용 거리 측정 화면(Frame).
 
     외부 연결(필수):
-      - on_back()
-      - on_open_green_view(context)
-      - on_open_layup_view(context)
-      - on_open_putt(context)
-      - on_open_settings()  [추가]
+      - on_back(): 이전 화면(예: PlayGolf)로 복귀
+      - on_open_green_view(context): GreenView 화면으로 전환
+      - on_open_layup_view(context): LayupView 화면으로 전환
+      - on_open_putt(context): PuttDistance 화면으로 전환
+      - on_open_settings(): Settings 화면으로 전환
+      - on_open_scorecard(): Scorecard 화면으로 전환
     """
 
     def __init__(
@@ -56,7 +62,8 @@ class DistanceScreen(tk.Frame):
         on_open_green_view: Optional[Callable[[dict], None]] = None,
         on_open_layup_view: Optional[Callable[[dict], None]] = None,
         on_open_putt: Optional[Callable[[dict], None]] = None,
-        on_open_settings: Optional[Callable[[], None]] = None,  # [추가]
+        on_open_settings: Optional[Callable[[], None]] = None,
+        on_open_scorecard: Optional[Callable[[], None]] = None,
     ):
         super().__init__(master, width=LCD_WIDTH, height=LCD_HEIGHT, bg="black")
         self.pack_propagate(False)
@@ -66,12 +73,14 @@ class DistanceScreen(tk.Frame):
         self.on_open_layup_view = on_open_layup_view
         self.on_open_putt = on_open_putt
         self.on_open_settings = on_open_settings
+        self.on_open_scorecard = on_open_scorecard
 
-        # context
-        self.parent_window: Optional[tk.Misc] = None
+        # 외부에서 주입되는 컨텍스트
+        self.parent_window: Optional[tk.Misc] = None  # PlayGolfFrame
         self.hole_row: Optional[pd.Series] = None
         self.gc_center_lat: float = float("nan")
         self.gc_center_lng: float = float("nan")
+
         self.cur_lat: float = float("nan")
         self.cur_lng: float = float("nan")
 
@@ -85,7 +94,7 @@ class DistanceScreen(tk.Frame):
         self.on_green_candidate_since: Optional[float] = None
         self.on_green_confirmed: bool = False
 
-        # transformer
+        # ENU transformer
         self.tf: Optional[Transformer] = None
         self.E_cur: float = 0.0
         self.N_cur: float = 0.0
@@ -100,7 +109,7 @@ class DistanceScreen(tk.Frame):
         self.has_rg: bool = False
         self.selected_green: str = "L"
 
-        # assets
+        # assets/images
         self.base_dir = Path(__file__).parent
         self.asset_dir = self.base_dir / "assets_image"
         self.images: Dict[Tuple[str, Optional[Tuple[int, int]]], ImageTk.PhotoImage] = {}
@@ -109,19 +118,25 @@ class DistanceScreen(tk.Frame):
         self.canvas = tk.Canvas(self, width=LCD_WIDTH, height=LCD_HEIGHT, highlightthickness=0, bg="black")
         self.canvas.pack()
 
-        # BACK
+        # Back 터치(좌상단)
         self._draw_back_hitbox()
 
-        # [추가] Setting 버튼(중앙 상단)
+        # Setting 버튼(중앙 상단)
         self.setting_button = tk.Button(self, text="Setting", command=self._on_settings)
 
-        # 기존 버튼 유지
+        # Scorecard 버튼(중앙 하단)
+        self.scorecard_button = tk.Button(self, text="scorecard", command=self._on_scorecard)
+
+        # LayupView 버튼(좌측)
         self.layupview_button = tk.Button(self, text="LayupView", command=self._on_layup_view)
+
+        # GreenView 버튼(우측)
         self.greenview_button = tk.Button(self, text="GreenView", command=self._on_green_view)
 
+        # 루프 핸들
         self._after_id: Optional[str] = None
 
-    # ---------- public ---------- #
+    # ---------- public API ---------- #
 
     def set_context(
         self,
@@ -146,26 +161,33 @@ class DistanceScreen(tk.Frame):
 
         self._update_position_from_parent()
 
+        # fix_point는 화면 진입 시점 1회 선정
         self.fix_point_name, self.fix_E, self.fix_N, self.fix_alt = self._select_fix_point()
+
+        # RG 존재 여부
         self.has_rg = self._check_rg_exists()
 
+        # 선택 그린 초기화: parent_window.last_green 사용
         if self.has_rg:
             self.selected_green = getattr(self.parent_window, "last_green", "L")
         else:
             self.selected_green = "L"
         setattr(self.parent_window, "last_green", self.selected_green)
 
+        # 상태 리셋
         self.start_E = self.start_N = self.start_alt = None
         self.shot_active = False
         self.on_green_candidate_since = None
         self.on_green_confirmed = False
 
     def start(self):
+        """1초 루프 시작"""
         self.stop()
         self._render_screen()
         self._after_id = self.after(1000, self._auto_update_loop)
 
     def stop(self):
+        """1초 루프 정지"""
         if self._after_id is not None:
             try:
                 self.after_cancel(self._after_id)
@@ -173,7 +195,7 @@ class DistanceScreen(tk.Frame):
                 pass
             self._after_id = None
 
-    # ---------- back ---------- #
+    # ---------- Back ---------- #
 
     def _draw_back_hitbox(self):
         self.canvas.create_text(60, 40, text="BACK", fill="white", font=("Helvetica", 14, "bold"))
@@ -185,14 +207,21 @@ class DistanceScreen(tk.Frame):
         if callable(self.on_back):
             self.on_back()
 
-    # ---------- settings ---------- #
+    # ---------- Settings ---------- #
 
     def _on_settings(self):
         if callable(self.on_open_settings):
             self.stop()
             self.on_open_settings()
 
-    # ---------- position ---------- #
+    # ---------- Scorecard ---------- #
+
+    def _on_scorecard(self):
+        if callable(self.on_open_scorecard):
+            self.stop()
+            self.on_open_scorecard()
+
+    # ---------- 위치 갱신 ---------- #
 
     def _update_position_from_parent(self):
         if self.parent_window is None:
@@ -209,23 +238,26 @@ class DistanceScreen(tk.Frame):
         self._render_screen()
         self._after_id = self.after(1000, self._auto_update_loop)
 
-    # ---------- images ---------- #
+    # ---------- 이미지 ---------- #
 
     def load_image(self, filename: str, size=None) -> ImageTk.PhotoImage:
         key = (filename, size)
         if key in self.images:
             return self.images[key]
+
         path = self.asset_dir / filename
         if not path.exists():
             raise FileNotFoundError(f"이미지 파일을 찾을 수 없습니다: {path}")
+
         img = Image.open(path).convert("RGBA")
         if size is not None:
             img = img.resize(size, Image.LANCZOS)
+
         photo = ImageTk.PhotoImage(img)
         self.images[key] = photo
         return photo
 
-    # ---------- data ---------- #
+    # ---------- 데이터 ---------- #
 
     def _get_label_point(self, label: str) -> Optional[Tuple[float, float]]:
         assert self.hole_row is not None
@@ -262,7 +294,9 @@ class DistanceScreen(tk.Frame):
         rg_n = self.hole_row.get("RG_N", np.nan)
         return not (pd.isna(rg_e) or pd.isna(rg_n))
 
-    def _get_green_center_and_points(self, which: str) -> Tuple[Tuple[float, float], float, List[Tuple[float, float, float]]]:
+    def _get_green_center_and_points(
+        self, which: str
+    ) -> Tuple[Tuple[float, float], float, List[Tuple[float, float, float]]]:
         assert self.hole_row is not None
         points: List[Tuple[float, float, float]] = []
 
@@ -342,6 +376,8 @@ class DistanceScreen(tk.Frame):
 
         return best_front or points[0], best_back or points[-1]
 
+    # ---------- on-green ---------- #
+
     def _is_point_in_polygon(self, x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
         inside = False
         n = len(polygon)
@@ -402,6 +438,8 @@ class DistanceScreen(tk.Frame):
             self.stop()
             self.on_open_putt(ctx)
 
+    # ---------- 거리 계산 ---------- #
+
     def _compute_distances(self) -> Dict:
         center, center_alt, points = self._get_green_center_and_points(self.selected_green)
         front_p, back_p = self._select_front_back(center, points)
@@ -416,6 +454,7 @@ class DistanceScreen(tk.Frame):
         current_alt = parent_alt - alt_offset
         diff_h = center_alt - current_alt
 
+        # SHOT
         shot_distance = None
         if self.start_E is not None and self.start_N is not None and self.start_alt is not None:
             flat_shot = euclidean_dist(P, (self.start_E, self.start_N))
@@ -428,6 +467,7 @@ class DistanceScreen(tk.Frame):
             landing = -0.11 * eDist_clamped + 64.0
             landing_rad = math.radians(landing) if landing != 0 else 1e-6
             extended_dist = diff_h / math.tan(landing_rad)
+
             distance_front = flat_front + extended_dist
             distance_center = flat_center + extended_dist
             distance_back = flat_back + extended_dist
@@ -445,26 +485,38 @@ class DistanceScreen(tk.Frame):
             conv = 1.09361
             unit_label = "Y"
 
+        distance_front = round(distance_front * conv)
+        distance_center = round(distance_center * conv)
+        distance_back = round(distance_back * conv)
+
+        shot_display = round(shot_distance * conv) if shot_distance is not None else None
+
         return dict(
-            front=round(distance_front * conv),
-            center=round(distance_center * conv),
-            back=round(distance_back * conv),
+            front=distance_front,
+            center=distance_center,
+            back=distance_back,
             diff_h=diff_h,
             mode=mode,
             unit_label=unit_label,
-            shot=(round(shot_distance * conv) if shot_distance is not None else None),
+            shot=shot_display,
         )
+
+    # ---------- 렌더 ---------- #
 
     def _render_screen(self):
         self.canvas.delete("all")
 
+        # background
         try:
             bg = self.load_image("background.png", size=(LCD_WIDTH, LCD_HEIGHT))
             self.canvas.create_image(0, 0, anchor="nw", image=bg)
         except FileNotFoundError:
             pass
 
+        # BACK
         self._draw_back_hitbox()
+
+        # top bar
         self._draw_top_bar()
 
         dist_info = self._compute_distances()
@@ -481,7 +533,10 @@ class DistanceScreen(tk.Frame):
         # Setting 버튼(중앙 상단)
         self.canvas.create_window(LCD_WIDTH // 2, 40, window=self.setting_button)
 
-        # 기존 버튼
+        # Scorecard 버튼(중앙 맨 아래)
+        self.canvas.create_window(LCD_WIDTH // 2, LCD_HEIGHT - 15, window=self.scorecard_button)
+
+        # LayupView 버튼(좌측) + GreenView 버튼(우측)
         self.canvas.create_window(70, 400, window=self.layupview_button)
         self.canvas.create_window(400, 400, window=self.greenview_button)
 
@@ -562,8 +617,14 @@ class DistanceScreen(tk.Frame):
         icon_name = "uphill.png" if diff_h > 0 else "downhill.png"
         img = self.load_image(icon_name)
         self.canvas.create_image(LCD_WIDTH - 115, LCD_HEIGHT // 2 - 30, image=img)
-        self.canvas.create_text(LCD_WIDTH - 110, LCD_HEIGHT // 2 - 70, text=f"{int(round(diff_h)):+d}",
-                                fill="white", font=("Helvetica", 25, "bold"))
+        self.canvas.create_text(
+            LCD_WIDTH - 110, LCD_HEIGHT // 2 - 70,
+            text=f"{int(round(diff_h)):+d}",
+            fill="white",
+            font=("Helvetica", 25, "bold"),
+        )
+
+    # ---------- LayupView ---------- #
 
     def _on_layup_view(self):
         if not callable(self.on_open_layup_view):
@@ -579,6 +640,8 @@ class DistanceScreen(tk.Frame):
         )
         self.stop()
         self.on_open_layup_view(ctx)
+
+    # ---------- GreenView ---------- #
 
     def _on_green_view(self):
         if not callable(self.on_open_green_view):

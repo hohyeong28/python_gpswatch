@@ -329,6 +329,9 @@ class GreenViewScreen(tk.Frame):
         RG가 없는 홀은 의미상 L만 표시.
         """
         has_rg = self._check_rg_exists()
+        if not has_rg:
+            return
+
         label = self.selected_green if has_rg else "L"
 
         # 표시 위치/크기 (필요 시 조정)

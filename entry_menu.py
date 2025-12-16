@@ -15,6 +15,7 @@ from green_view import GreenViewScreen
 from layup_view import LayupViewScreen
 from meas_putt_distance import PuttDistanceScreen
 from scoring import ScoringScreen
+from scorecard import ScorecardScreen  # [추가]
 
 
 class ScreenManager(tk.Frame):
@@ -55,8 +56,15 @@ class BaseScreen(tk.Frame):
 
 
 class MenuScreen(BaseScreen):
-    def __init__(self, manager: ScreenManager, asset_dir: Path, on_play: Callable[[], None], on_open_settings: Callable[[], None]):
+    def __init__(
+        self,
+        manager: ScreenManager,
+        asset_dir: Path,
+        on_play: Callable[[], None],
+        on_open_settings: Callable[[], None],
+    ):
         super().__init__(manager, asset_dir)
+
         self.on_play = on_play
         self.on_open_settings = on_open_settings
 
@@ -103,10 +111,11 @@ class MenuScreen(BaseScreen):
         play_region = self.canvas.create_rectangle(0, 0, LCD_WIDTH, LCD_HEIGHT // 2, outline="", fill="")
         self.canvas.tag_bind(play_region, "<Button-1>", lambda e: self.on_play())
 
-        # settings는 '경로 분기'가 필요하므로 show("settings") 직접 호출 금지
+        # Setting
         setting_region = self.canvas.create_rectangle(0, LCD_HEIGHT // 2, LCD_WIDTH // 2, LCD_HEIGHT, outline="", fill="")
         self.canvas.tag_bind(setting_region, "<Button-1>", lambda e: self.on_open_settings())
 
+        # History
         history_region = self.canvas.create_rectangle(LCD_WIDTH // 2, LCD_HEIGHT // 2, LCD_WIDTH, LCD_HEIGHT, outline="", fill="")
         self.canvas.tag_bind(history_region, "<Button-1>", lambda e: self.manager.show("history"))
 
@@ -114,8 +123,10 @@ class MenuScreen(BaseScreen):
 class HistoryScreen(BaseScreen):
     def __init__(self, manager: ScreenManager, asset_dir: Path):
         super().__init__(manager, asset_dir)
+
         self.canvas = tk.Canvas(self, width=LCD_WIDTH, height=LCD_HEIGHT, highlightthickness=0, bg="black")
         self.canvas.pack(fill="both", expand=True)
+
         self.btn_back = tk.Button(self, text="BACK", command=lambda: self.manager.show("menu"))
         self._render()
 
@@ -126,6 +137,7 @@ class HistoryScreen(BaseScreen):
             self.canvas.create_image(0, 0, anchor="nw", image=bg)
         except FileNotFoundError:
             pass
+
         self.canvas.create_text(LCD_WIDTH // 2, 80, text="ROUND HISTORY", fill="white", font=("Helvetica", 24, "bold"))
         self.canvas.create_text(LCD_WIDTH // 2, LCD_HEIGHT // 2, text="(TODO)", fill="white", font=("Helvetica", 14, "bold"))
         self.canvas.create_window(LCD_WIDTH - 60, 30, window=self.btn_back)
@@ -140,7 +152,6 @@ class GolfWatchApp:
         self.asset_dir = Path(__file__).parent / "assets_image"
         self.manager = ScreenManager(root)
 
-        # settings 복귀 분기
         self._settings_return_to: str = "menu"
 
         self.playgolf_screen = playgolf.PlayGolfFrame(
@@ -169,6 +180,7 @@ class GolfWatchApp:
             on_open_layup_view=self._open_layup_view_from_distance,
             on_open_putt=self._open_putt_from_distance,
             on_open_settings=self._open_settings_from_distance,
+            on_open_scorecard=self._open_scorecard_from_distance,  # [추가]
         )
 
         self.green_view_screen = GreenViewScreen(self.manager, on_back=self._back_to_distance_from_green)
@@ -186,6 +198,12 @@ class GolfWatchApp:
             on_done=self._on_scoring_done,
         )
 
+        # scorecard
+        self.scorecard_screen = ScorecardScreen(
+            self.manager,
+            on_back=self._back_to_distance_from_scorecard,
+        )
+
         self.history_screen = HistoryScreen(self.manager, self.asset_dir)
 
         self.manager.add("menu", self.menu_screen)
@@ -196,6 +214,7 @@ class GolfWatchApp:
         self.manager.add("layup", self.layup_view_screen)
         self.manager.add("putt", self.putt_screen)
         self.manager.add("scoring", self.scoring_screen)
+        self.manager.add("scorecard", self.scorecard_screen)
         self.manager.add("history", self.history_screen)
 
         self.manager.show("menu")
@@ -205,7 +224,7 @@ class GolfWatchApp:
     def _open_settings_from_menu(self):
         self._settings_return_to = "menu"
         try:
-            self.settings_screen.start()  # setting.py에 start() 추가됨(동기화)
+            self.settings_screen.start()
         except Exception:
             pass
         self.manager.show("settings")
@@ -229,6 +248,30 @@ class GolfWatchApp:
         else:
             self.manager.show("menu")
 
+    # ---- Scorecard ----
+
+    def _open_scorecard_from_distance(self):
+        try:
+            self.distance_screen.stop()
+        except Exception:
+            pass
+
+        try:
+            self.scorecard_screen.set_context(parent_window=self.playgolf_screen)
+        except Exception:
+            pass
+
+        self.manager.show("scorecard")
+        self.scorecard_screen.start()
+
+    def _back_to_distance_from_scorecard(self):
+        try:
+            self.scorecard_screen.stop()
+        except Exception:
+            pass
+        self.manager.show("distance")
+        self.distance_screen.start()
+
     # ---- PlayGolf ----
 
     def _go_playgolf(self):
@@ -245,13 +288,14 @@ class GolfWatchApp:
             print("[ENTRY] playgolf stop error:", e)
         self.manager.show("menu")
 
-    # ---- Screen transitions ----
+    # ---- Transitions ----
 
     def _open_distance_from_playgolf(self, ctx: dict):
         try:
             self.distance_screen.stop()
         except Exception:
             pass
+
         self.distance_screen.set_context(
             parent_window=ctx["parent_window"],
             hole_row=ctx["hole_row"],
@@ -357,6 +401,20 @@ class GolfWatchApp:
 
     def _on_scoring_done(self, result: dict):
         print("[ENTRY] scoring done:", result)
+
+        # [추가] 홀별 스코어 저장 (Scorecard에서 사용)
+        try:
+            hole_no = int(result.get("Hole", 0))
+            if hole_no > 0:
+                if not hasattr(self.playgolf_screen, "round_scores") or not isinstance(
+                        self.playgolf_screen.round_scores, dict):
+                    self.playgolf_screen.round_scores = {}
+                # 같은 홀 재입력 시 덮어쓰기(최신값 유지)
+                self.playgolf_screen.round_scores[hole_no] = result
+        except Exception as e:
+            print("[ENTRY] round_scores save error:", e)
+
+        # 기존 동작 유지
         try:
             self.scoring_screen.stop()
         except Exception:
@@ -368,3 +426,4 @@ class GolfWatchApp:
 
         self.manager.show("distance")
         self.distance_screen.start()
+
