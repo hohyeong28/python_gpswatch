@@ -9,15 +9,12 @@
 # - BACK(좌상단) 제공: on_back() 콜백 호출
 # - 단독 실행 코드 제거
 #
-# UI/동작(기존 유지):
-# - background.png
-# - Score_Line.png
-# - 상단: Hxx / Pn
-# - 중앙 상단: [-] [라벨] [+] / (par_score)
-# - 하단 좌측: "스코어" / 값(score)
-# - 하단 우측: "퍼트수" / 값(putt_score) (선택 시 녹색)
-# - +/- 기본 대상은 par_score, 퍼트수 선택 시 putt_score 조정
-# - OK: confirm.png + "OK" 텍스트 (canvas 클릭)
+# [추가/수정]
+# - 시뮬레이션용: 10초간 입력이 없으면 자동 OK
+# - 자동 OK는 수동 OK와 "완전히 동일"하게 동작:
+#   -> 동일한 data dict 생성 + 동일한 on_done 호출 경로(_on_ok) 사용
+# - +/-/퍼트수 선택 등 모든 입력은 자동 OK 타이머 리셋
+# - OK/BACK 시 자동 OK 타이머 취소(중복 호출 방지)
 
 from pathlib import Path
 from typing import Dict, Optional, Callable
@@ -69,6 +66,10 @@ class ScoringScreen(tk.Frame):
         self.putt_score: int = 2         # 기본 2
         self.active_field: str = "par"   # "par" 또는 "putt"
 
+        # [추가] 자동 OK 타이머(시뮬레이션 10초)
+        self._auto_ok_after_id: Optional[str] = None
+        self._auto_ok_timeout_ms: int = 10_000  # 추후 필드 적용 시 변경 예정
+
         # 캔버스
         self.canvas = tk.Canvas(
             self,
@@ -96,11 +97,49 @@ class ScoringScreen(tk.Frame):
         self.putt_score = 2
         self.active_field = "par"
 
+        # 컨텍스트 갱신 시 타이머는 start()에서 예약(렌더 후)하도록 함
+
     def start(self):
         """
         scoring 화면 표시 시 호출(1회 렌더).
+        - 렌더 후 자동 OK 타이머 시작
         """
         self._render_screen()
+        self._schedule_auto_ok()
+
+    def stop(self):
+        """
+        (선택적으로 entry_menu에서 호출 가능)
+        - 자동 OK 타이머 취소
+        """
+        self._cancel_auto_ok()
+
+    # ---------------- auto OK timer ---------------- #
+
+    def _cancel_auto_ok(self):
+        if self._auto_ok_after_id is None:
+            return
+        try:
+            self.after_cancel(self._auto_ok_after_id)
+        except Exception:
+            pass
+        self._auto_ok_after_id = None
+
+    def _schedule_auto_ok(self):
+        """
+        '무입력 10초'를 위해, 입력이 있을 때마다 이 함수를 호출하여 타이머를 리셋한다.
+        """
+        self._cancel_auto_ok()
+        self._auto_ok_after_id = self.after(self._auto_ok_timeout_ms, self._on_auto_ok_timeout)
+
+    def _on_auto_ok_timeout(self):
+        """
+        10초 무입력 시 자동 OK.
+        수동 OK와 완전히 동일하게 동작하도록 _on_ok(None) 호출.
+        """
+        self._auto_ok_after_id = None
+        # 자동 OK는 수동 OK와 동일 경로
+        self._on_ok(event=None)
 
     # ---------------- image ---------------- #
 
@@ -148,6 +187,8 @@ class ScoringScreen(tk.Frame):
         self.canvas.tag_bind(back_region, "<Button-1>", lambda e: self._on_back())
 
     def _on_back(self):
+        # BACK은 '입력'이지만, 자동 OK 타이머는 의미 없으므로 취소
+        self._cancel_auto_ok()
         if callable(self.on_back):
             self.on_back()
 
@@ -292,10 +333,12 @@ class ScoringScreen(tk.Frame):
     # ---------------- events ---------------- #
 
     def _on_select_putt(self, event):
+        self._schedule_auto_ok()  # 입력 발생 -> 타이머 리셋
         self.active_field = "par" if self.active_field == "putt" else "putt"
         self._render_screen()
 
     def _on_plus(self, event):
+        self._schedule_auto_ok()  # 입력 발생 -> 타이머 리셋
         if self.active_field == "putt":
             self.putt_score += 1
         else:
@@ -304,6 +347,7 @@ class ScoringScreen(tk.Frame):
         self._render_screen()
 
     def _on_minus(self, event):
+        self._schedule_auto_ok()  # 입력 발생 -> 타이머 리셋
         if self.active_field == "putt":
             self.putt_score -= 1
         else:
@@ -313,11 +357,14 @@ class ScoringScreen(tk.Frame):
 
     def _on_ok(self, event):
         """
-        OK 클릭 시:
+        OK 클릭/자동 OK 시:
           - 결과 dict 생성
           - on_done(result) 콜백 호출
           - (다음 화면 전환은 entry_menu가 담당)
         """
+        # OK는 종료 이벤트이므로 자동 OK 타이머 취소(중복 방지)
+        self._cancel_auto_ok()
+
         hole_no = int(self.hole_row.get("Hole", 0)) if self.hole_row is not None else 0
         data = {
             "Hole": hole_no,

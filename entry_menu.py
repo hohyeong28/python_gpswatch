@@ -12,7 +12,7 @@ import playgolf
 
 from measure_distance import DistanceScreen
 from green_view import GreenViewScreen
-from layup_view import LayupViewScreen   # [추가]
+from layup_view import LayupViewScreen
 from meas_putt_distance import PuttDistanceScreen
 from scoring import ScoringScreen
 
@@ -172,33 +172,29 @@ class GolfWatchApp:
 
         # ----------- 화면 인스턴스 생성 ----------- #
 
-        # playgolf (Frame) - on_open_distance 콜백 핵심
         self.playgolf_screen = playgolf.PlayGolfFrame(
             self.manager,
-            on_back=self._back_from_playgolf,                 # stop + menu
+            on_back=self._back_from_playgolf,
             on_open_distance=self._open_distance_from_playgolf,
         )
 
-        # menu (Frame) - Play 선택 시 start + show
         self.menu_screen = MenuScreen(
             self.manager,
             self.asset_dir,
             on_play=self._go_playgolf,
         )
 
-        # settings (Frame)
         self.settings_screen = setting.SettingsFrame(
             self.manager,
             settings=app_settings,
             on_back=lambda: self.manager.show("menu"),
         )
 
-        # distance / green / layup / putt (Frame)
         self.distance_screen = DistanceScreen(
             self.manager,
             on_back=self._back_to_playgolf_from_distance,
             on_open_green_view=self._open_green_view_from_distance,
-            on_open_layup_view=self._open_layup_view_from_distance,  # [추가]
+            on_open_layup_view=self._open_layup_view_from_distance,
             on_open_putt=self._open_putt_from_distance,
         )
 
@@ -207,7 +203,7 @@ class GolfWatchApp:
             on_back=self._back_to_distance_from_green,
         )
 
-        self.layup_view_screen = LayupViewScreen(  # [추가]
+        self.layup_view_screen = LayupViewScreen(
             self.manager,
             on_back=self._back_to_distance_from_layup,
         )
@@ -218,9 +214,10 @@ class GolfWatchApp:
             on_open_scoring=self._open_scoring_from_putt,
         )
 
+        # [보완] scoring BACK도 stop 처리 포함
         self.scoring_screen = ScoringScreen(
             self.manager,
-            on_back=lambda: self.manager.show("menu"),
+            on_back=self._back_from_scoring,
             on_done=self._on_scoring_done,
         )
 
@@ -232,20 +229,16 @@ class GolfWatchApp:
         self.manager.add("playgolf", self.playgolf_screen)
         self.manager.add("distance", self.distance_screen)
         self.manager.add("green", self.green_view_screen)
-        self.manager.add("layup", self.layup_view_screen)  # [추가]
+        self.manager.add("layup", self.layup_view_screen)
         self.manager.add("putt", self.putt_screen)
         self.manager.add("scoring", self.scoring_screen)
         self.manager.add("history", self.history_screen)
 
-        # 최초 화면
         self.manager.show("menu")
 
     # ----------------- 공통 전환 유틸 ----------------- #
 
     def _go_playgolf(self):
-        """
-        Menu -> PlayGolf 진입 시점에서만 simulator + 루프를 시작한다.
-        """
         try:
             self.playgolf_screen.start()
         except Exception as e:
@@ -253,18 +246,31 @@ class GolfWatchApp:
         self.manager.show("playgolf")
 
     def _back_from_playgolf(self):
-        """
-        PlayGolf -> Menu 복귀 시점에서 simulator + 루프를 정지한다.
-        """
         try:
             self.playgolf_screen.stop()
         except Exception as e:
             print("[ENTRY] playgolf stop error:", e)
         self.manager.show("menu")
 
+    # ----------------- scoring back 보완 ----------------- #
+
+    def _back_from_scoring(self):
+        # [보완] scoring 자동 OK 타이머(after) 취소 보장
+        try:
+            self.scoring_screen.stop()
+        except Exception:
+            pass
+        self.manager.show("menu")
+
     # ----------------- 전환 핸들러들 ----------------- #
 
     def _open_distance_from_playgolf(self, ctx: dict):
+        # [보완] distance_screen after 루프 중복 방지
+        try:
+            self.distance_screen.stop()
+        except Exception:
+            pass
+
         self.distance_screen.set_context(
             parent_window=ctx["parent_window"],
             hole_row=ctx["hole_row"],
@@ -279,7 +285,6 @@ class GolfWatchApp:
     def _back_to_playgolf_from_distance(self):
         self.distance_screen.stop()
         self.manager.show("playgolf")
-        # playgolf 화면은 leadsim이 계속 돌아야 하므로 stop 호출하지 않음
 
     def _open_green_view_from_distance(self, ctx: dict):
         self.distance_screen.stop()
@@ -300,8 +305,6 @@ class GolfWatchApp:
         self.manager.show("distance")
         self.distance_screen.start()
 
-    # ----------------- [추가] LayupView 전환 핸들러 ----------------- #
-
     def _open_layup_view_from_distance(self, ctx: dict):
         self.distance_screen.stop()
         self.layup_view_screen.set_context(
@@ -320,8 +323,6 @@ class GolfWatchApp:
         self.layup_view_screen.stop()
         self.manager.show("distance")
         self.distance_screen.start()
-
-    # ------------------------------------------------ #
 
     def _open_putt_from_distance(self, ctx: dict):
         self.distance_screen.stop()
@@ -345,6 +346,12 @@ class GolfWatchApp:
         self.putt_screen.stop()
 
         if app_settings.scorecard == "사용":
+            # [보완] scoring 진입 전 타이머가 남아있을 수 있으므로 정리
+            try:
+                self.scoring_screen.stop()
+            except Exception:
+                pass
+
             self.scoring_screen.set_context(
                 parent_window=ctx["parent_window"],
                 hole_row=ctx["hole_row"],
@@ -356,29 +363,30 @@ class GolfWatchApp:
         # scorecard == "안함"
         parent = ctx["parent_window"]
         try:
-            # [수정] out-of-green 확정 시점 트리거(미사용 시) -> notify_out_of_green_confirmed
             if hasattr(parent, "notify_out_of_green_confirmed"):
                 parent.notify_out_of_green_confirmed()
             else:
-                # 호환: 기존 메서드가 남아있다면 호출
                 parent.find_next_hole()
         except Exception as e:
             print("[ENTRY] notify_out_of_green_confirmed error:", e)
 
-        # 탐색은 PlayGolfFrame 내부 루프가 수행, 화면은 distance로 복귀
         self.manager.show("distance")
         self.distance_screen.start()
 
     def _on_scoring_done(self, result: dict):
         print("[ENTRY] scoring done:", result)
 
-        # [수정] scorecard 사용 시 OK가 홀 종료 확정이므로 이 시점에 next hole 탐색 트리거
+        # [보완] scoring 자동 OK 타이머(after) 취소 보장
+        try:
+            self.scoring_screen.stop()
+        except Exception:
+            pass
+
+        # scorecard 사용 시 OK(또는 자동 OK)가 홀 종료 확정 트리거
         try:
             self.playgolf_screen.notify_out_of_green_confirmed()
         except Exception as e:
             print("[ENTRY] notify_out_of_green_confirmed error:", e)
 
-        # 다음 홀 확정/전환은 PlayGolfFrame 내부에서 on_open_distance 콜백으로 수행됨
-        # 사용자는 거리 화면으로 복귀해 계속 진행
         self.manager.show("distance")
         self.distance_screen.start()
