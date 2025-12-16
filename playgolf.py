@@ -44,7 +44,7 @@ from simul_gps import GPSSimulator
 from find_next_hole import NextHoleFinder
 
 threshold_dist = 20
-sim_gps_file = "남서울CC_out.xlsx"
+sim_gps_file = "안양CC.xlsx"
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
