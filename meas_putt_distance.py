@@ -5,6 +5,10 @@
 # - out-of-green(3초) → scoring 호출은 콜백(on_open_scoring)으로 전환
 # - on_back() 제공(보통 DistanceScreen으로 복귀)
 # - 단독 실행 코드 제거
+#
+# [수정 반영]
+# - scorecard 미사용("안함")일 때만:
+#   out-of-green 3초 확정 시점에 parent_window.notify_out_of_green_confirmed() 호출
 
 import time
 from pathlib import Path
@@ -17,6 +21,7 @@ import numpy as np
 from pyproj import CRS, Transformer
 
 from config import LCD_WIDTH, LCD_HEIGHT
+from setting import app_settings  # [추가]
 
 
 def make_transformer(lat0: float, lon0: float) -> Optional[Transformer]:
@@ -247,9 +252,20 @@ class PuttDistanceScreen(tk.Frame):
         if (now - self.out_of_green_since) < 3.0:
             return
 
+        # out-of-green 확정
         self.scoring_called = True
-        print("[PuttDistanceScreen] 그린 이탈 3초 → scoring 전환")
+        print("[PuttDistanceScreen] 그린 이탈 3초 확정")
 
+        # [추가] scorecard 미사용일 때만: 이 시점이 홀 종료 트리거
+        if app_settings.scorecard != "사용":
+            parent = self.parent_window
+            try:
+                if parent is not None and hasattr(parent, "notify_out_of_green_confirmed"):
+                    parent.notify_out_of_green_confirmed()
+            except Exception as e:
+                print("[PuttDistanceScreen] notify_out_of_green_confirmed error:", e)
+
+        # scoring 전환(기존 동작 유지)
         if callable(self.on_open_scoring):
             ctx = dict(parent_window=self.parent_window, hole_row=self.hole_row)
             self.stop()

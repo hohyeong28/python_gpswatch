@@ -1,176 +1,400 @@
+# find_next_hole.py
+#
+# [요구사항 반영]
+# 1) find_next_hole은 find_1st_hole과 유사한 개념(거리 기반 후보 탐색)이나,
+#    다음 홀은 "티 영역" 판별이 가장 안정적이므로 T1~T6만 사용한다.
+# 2) 티 클러스터 방식 적용:
+#    - 각 홀의 T1~T6 포인트 집합을 티 클러스터로 보고,
+#      현재 위치에서의 티 접근 거리는 min(dist(cur, Ti))로 정의한다.
+# 3) 후보 감지 시 누적 60초(슬라이딩 윈도우) 조건으로 확정한다.
+# 4) On-green 이후 out-of-green 확정 후에도 바로 탐색하지 않고,
+#    그린 폴리곤과의 최소 거리가 30m 이상일 때만 탐색/확정을 진행한다.
+#
+# [사용 방법 요약]
+# - PlayGolfFrame 등에서 60초 주기(평상시)로 update(...) 호출.
+# - update(...)가 candidate를 감지하면, 호출 주기를 5~10초로 높여 재확인.
+# - update(...)가 (confirmed=True, next_row=<pd.Series>)를 반환하면
+#   current hole을 변경하고 measure_distance로 전환한다.
+
+from __future__ import annotations
+
 import math
 import time
-from pathlib import Path
-from typing import Optional, Dict, Tuple, List
+from dataclasses import dataclass
+from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 
-import tkinter as tk
-from PIL import Image, ImageTk
 import numpy as np
 import pandas as pd
 from pyproj import CRS, Transformer
 
-from config import LCD_WIDTH, LCD_HEIGHT
-from setting import app_settings
+
+# --------------------------
+# Geometry helpers
+# --------------------------
+
+def make_transformer(lat0: float, lon0: float) -> Optional[Transformer]:
+    if np.isnan(lat0) or np.isnan(lon0):
+        return None
+    wgs84 = CRS.from_epsg(4326)
+    aeqd = CRS.from_proj4(
+        f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +datum=WGS84 +units=m"
+    )
+    return Transformer.from_crs(wgs84, aeqd, always_xy=True)  # (lon, lat) -> (E, N)
 
 
-def find_next_hole(self) -> bool:
+def euclid(p: Tuple[float, float], q: Tuple[float, float]) -> float:
+    return math.hypot(p[0] - q[0], p[1] - q[1])
+
+
+def point_segment_distance(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+    # Distance from point P to segment AB
+    vx = bx - ax
+    vy = by - ay
+    wx = px - ax
+    wy = py - ay
+
+    vv = vx * vx + vy * vy
+    if vv <= 1e-12:
+        return math.hypot(px - ax, py - ay)
+
+    t = (wx * vx + wy * vy) / vv
+    if t < 0.0:
+        cx, cy = ax, ay
+    elif t > 1.0:
+        cx, cy = bx, by
+    else:
+        cx = ax + t * vx
+        cy = ay + t * vy
+    return math.hypot(px - cx, py - cy)
+
+
+def point_polygon_min_distance(px: float, py: float, polygon: List[Tuple[float, float]]) -> float:
     """
-    다음 홀 탐색 함수.
+    Polygon is a closed loop (list of vertices). We compute min distance to edges.
+    If polygon has <2 points, returns inf. If exactly 2, treated as a segment.
+    """
+    n = len(polygon)
+    if n == 0:
+        return float("inf")
+    if n == 1:
+        return math.hypot(px - polygon[0][0], py - polygon[0][1])
+    if n == 2:
+        return point_segment_distance(px, py, polygon[0][0], polygon[0][1], polygon[1][0], polygon[1][1])
 
-    1. self.gc_df (해당 골프장 전체 홀 DB)를 기준으로 각 행(각 홀)을 검사
-    2. 각 홀에 대해 T1~T6 포인트들만 이용해 직선 체인 생성:
-         - ["T1", "T2", "T3", "T4", "T5", "T6"] 순서로 존재하는 포인트를 이어 선분 목록 생성
-    3. 현재 위치를 ENU로 변환 후 각 직선에 대한 최소 거리 계산
-    4. 최소 거리 <= threshold_dist 인 홀들 중에서 가장 가까운 홀을 "다음 홀"로 fix
-    5. alt_offset 재계산 후 measure_distance 화면 호출
-    6. 성공 시 True, 실패 시 False 반환
+    best = float("inf")
+    for i in range(n):
+        ax, ay = polygon[i]
+        bx, by = polygon[(i + 1) % n]
+        d = point_segment_distance(px, py, ax, ay, bx, by)
+        if d < best:
+            best = d
+    return best
+
+
+# --------------------------
+# Data model
+# --------------------------
+
+@dataclass
+class NextHoleConfig:
+    # 티 클러스터 근접 임계값 (m)
+    tee_detect_threshold_m: float = 35.0
+
+    # 후보 확정 누적 시간 (s)
+    confirm_cum_seconds: float = 60.0
+
+    # 누적 계산 슬라이딩 윈도우 (s) : 90초 창에서 60초 이상 근접이면 확정(권장)
+    window_seconds: float = 90.0
+
+    # out-of-green 이후 다음 홀 탐색 시작 조건: 그린 폴리곤 최소거리 >= 30m
+    min_green_exit_distance_m: float = 30.0
+
+    # 후보가 바뀔 때 너무 민감하게 바뀌지 않도록 약간의 히스테리시스 (m)
+    # new_candidate_dist가 (current_candidate_dist - hysteresis)보다 작을 때만 후보 교체
+    switch_hysteresis_m: float = 3.0
+
+
+@dataclass
+class CandidateResult:
+    hole_row: pd.Series
+    tee_min_dist_m: float
+
+
+# --------------------------
+# NextHoleFinder
+# --------------------------
+
+class NextHoleFinder:
+    """
+    상태를 내부에 유지하면서, update() 호출마다 "다음 홀 확정 여부"를 판단한다.
+
+    입력:
+    - gc_df: 전체 홀 데이터프레임(각 행이 1홀)
+    - gc_center_lat/lng: 동일 로컬 좌표계(ENU) 변환 기준
+    - current_hole_row: 현재 플레이 중인 홀(row)
+    - cur_lat/lng: 현재 GPS
+    - out_of_green_confirmed: out-of-green 확정 여부(putt_distance 등에서 결정)
+    - green_polygon_EN: 현재 홀의 그린 폴리곤(ENU) (LG/RG 선택 반영된 폴리곤)
+    - now_ts: time.time() 기준 타임스탬프 (None이면 내부에서 time.time())
+
+    출력:
+    - (confirmed, next_row_or_none, debug_dict)
     """
 
-    # ★ 현재 위경도 로그 출력 (WGS84)
-    self.log_current_position(prefix="find_next_hole - WGS84")
+    def __init__(self, gc_df: pd.DataFrame, gc_center_lat: float, gc_center_lng: float, config: Optional[NextHoleConfig] = None):
+        self.gc_df = gc_df
+        self.gc_center_lat = gc_center_lat
+        self.gc_center_lng = gc_center_lng
+        self.cfg = config or NextHoleConfig()
 
-    if self.gc_df is None or self.gc_df.empty:
-        print("[find_next_hole] GC 데이터 없음 (gc_df 비어 있음)")
-        return False
+        self.tf = make_transformer(self.gc_center_lat, self.gc_center_lng)
 
-    if self.gc_center_lat is None or self.gc_center_lng is None:
-        print("[find_next_hole] GC 중심 좌표 없음")
-        return False
+        # 상태: 후보 홀 + 누적
+        self._candidate_id: Optional[int] = None  # df index 또는 고유 id용 (여기서는 df index 사용)
+        self._candidate_row: Optional[pd.Series] = None
+        self._candidate_best_dist: float = float("inf")
 
-    # 현재 위치 ENU 변환 (해당 GC 기준)
-    tf = make_transformer(self.gc_center_lat, self.gc_center_lng)
-    if tf is None:
-        print("[find_next_hole] Transformer 생성 실패")
-        return False
+        # sliding window samples: (ts, is_in, dt)
+        # dt는 이전 샘플과의 시간 간격(초)로 누적 계산에 사용
+        self._samples: Deque[Tuple[float, bool, float]] = deque(maxlen=500)
 
-    # self.longitude, self.latitude 는 WGS84 좌표라고 가정
-    E_cur, N_cur = tf.transform(self.longitude, self.latitude)
+        self._last_ts: Optional[float] = None
 
-    def get_point(row, label: str):
-        """row에서 label_E, label_N을 읽어 ENU 좌표 반환 (없거나 NaN이면 None)"""
+        # 탐색 활성화 조건(그린 30m 이탈 + out-of-green)
+        self._search_enabled: bool = False
+
+    # ---------- row helpers ----------
+
+    @staticmethod
+    def _get_EN_point(row: pd.Series, label: str) -> Optional[Tuple[float, float]]:
         e = row.get(f"{label}_E", np.nan)
         n = row.get(f"{label}_N", np.nan)
         if pd.isna(e) or pd.isna(n):
             return None
         return float(e), float(n)
 
-    def build_chain_segments(points_order, row):
+    def _tee_points(self, row: pd.Series) -> List[Tuple[float, float]]:
+        pts: List[Tuple[float, float]] = []
+        for k in range(1, 7):
+            p = self._get_EN_point(row, f"T{k}")
+            if p is not None:
+                pts.append(p)
+        return pts
+
+    # ---------- candidate selection ----------
+
+    def _find_best_candidate(self, E_cur: float, N_cur: float, current_hole_row: Optional[pd.Series]) -> Optional[CandidateResult]:
         """
-        points_order: ["T1","T2","T3","T4","T5","T6"] 와 같이 포인트 이름 리스트
-        row: 한 홀의 데이터
-        존재하는 포인트들끼리만 인접 선분 생성 (중간 포인트 없으면 스킵하고 다음 것으로 연결)
+        티 클러스터 거리(min dist to T1..T6)가 가장 작은 홀을 찾는다.
+        현재 홀은 제외한다.
         """
-        pts = {}
-        for name in points_order:
-            pts[name] = get_point(row, name)
-
-        segs = []
-        prev = None
-        for name in points_order:
-            p = pts[name]
-            if p is None:
-                continue
-            if prev is not None:
-                segs.append((prev, p))
-            prev = p
-        return segs
-
-    best_row = None
-    best_dist = float("inf")
-
-    # threshold_dist 와 point_segment_distance 는 find_1st_hole 과 동일하게 사용
-    for _, row in self.gc_df.iterrows():
-        segments = []
-
-        # T1~T6 체인만 사용 (IP1, IP2, GC는 사용하지 않음)
-        segments += build_chain_segments(["T1", "T2", "T3", "T4", "T5", "T6"], row)
-
-        if not segments:
-            continue
-
-        hole_min = float("inf")
-        for (a, b) in segments:
-            dist = point_segment_distance(E_cur, N_cur, a[0], a[1], b[0], b[1])
-            if dist < hole_min:
-                hole_min = dist
-
-        # Threshold 이내 + 전역 최소 거리 갱신
-        if hole_min <= threshold_dist and hole_min < best_dist:
-            best_dist = hole_min
-            best_row = row
-
-    if best_row is None:
-        # print(f"[find_next_hole] {threshold_dist}m 이내에 어느 홀의 T1~T6도 없음 (다음 홀 판단 불가)")
-        return False
-
-    # 다음 홀 fix
-    gc_code = best_row.get("GC_name_code")
-    course_name = best_row.get("course_name", "")
-    hole = best_row.get("Hole", "")
-
-    print(
-        f"[find_next_hole] 다음 홀 fix: "
-        f"GC_code={gc_code}, course={course_name}, hole={hole}, "
-        f"dist≈{best_dist:.1f} m"
-    )
-
-    # ---------- alt_offset 계산 ----------
-    # 1) fix_point 후보(T1~T6, IP1, IP2) 중 현재 ENU 위치(E_cur,N_cur)에 가장 가까운 포인트 선택
-    # 2) 해당 포인트의 DB 고도(dAlt)를 fix_point_db_alt 로 사용
-    # 3) alt_offset = GPS_alt_at_fix - fix_point_db_alt
-
-    def get_label_alt(row, label: str) -> Optional[float]:
-        a = row.get(f"{label}_dAlt", np.nan)
-        if pd.isna(a):
+        if self.gc_df is None or self.gc_df.empty:
             return None
-        return float(a)
 
-    fix_labels = ["T1", "T2", "T3", "T4", "T5", "T6", "IP1", "IP2"]
-    best_fix_dist = float("inf")
-    best_fix_alt_db: Optional[float] = None
-    best_fix_label: Optional[str] = None
+        best: Optional[CandidateResult] = None
+        best_dist = float("inf")
 
-    for lab in fix_labels:
-        p = get_point(best_row, lab)
-        if p is None:
-            continue
-        d = math.hypot(E_cur - p[0], N_cur - p[1])
-        alt_db = get_label_alt(best_row, lab)
-        if alt_db is None:
-            continue
-        if d < best_fix_dist:
-            best_fix_dist = d
-            best_fix_alt_db = alt_db
-            best_fix_label = lab
+        # 현재 홀 식별을 위해 Hole 번호/인덱스를 우선 사용
+        cur_hole_num = None
+        cur_df_index = None
+        if current_hole_row is not None:
+            cur_hole_num = current_hole_row.get("Hole", None)
+            # current_hole_row가 df의 row view라면 name이 index일 가능성이 큼
+            try:
+                cur_df_index = int(current_hole_row.name)  # type: ignore
+            except Exception:
+                cur_df_index = None
 
-    if best_fix_alt_db is not None:
-        gps_alt_at_fix = self.altitude  # find_next_hole fix 시점의 GPS alt
-        self.alt_offset = gps_alt_at_fix - best_fix_alt_db
-        print(
-            f"[find_next_hole] alt_offset 계산: "
-            f"fix_label={best_fix_label}, "
-            f"GPS_alt={gps_alt_at_fix:.2f}, "
-            f"fix_alt_db={best_fix_alt_db:.2f}, "
-            f"alt_offset={self.alt_offset:.2f}"
-        )
-    else:
-        # 적절한 fix_point alt 를 찾지 못한 경우, 보정 0으로
-        self.alt_offset = 0.0
-        print("[find_next_hole] fix_point alt 없음 → alt_offset = 0.0")
+        for idx, row in self.gc_df.iterrows():
+            # 현재 홀 제외(가능한 경우)
+            if cur_df_index is not None and idx == cur_df_index:
+                continue
+            if cur_hole_num is not None:
+                try:
+                    if int(row.get("Hole", -999)) == int(cur_hole_num):
+                        continue
+                except Exception:
+                    pass
 
-    # -----------------------------------
+            tees = self._tee_points(row)
+            if not tees:
+                continue
 
-    try:
-        from measure_distance import open_distance_window
-        open_distance_window(
-            parent=self,
-            hole_row=best_row,
-            gc_center_lat=self.gc_center_lat,
-            gc_center_lng=self.gc_center_lng,
-            cur_lat=self.latitude,
-            cur_lng=self.longitude,
-        )
-    except Exception as e:
-        print(f"[find_next_hole] measure_distance 호출 중 오류: {e}")
+            dmin = float("inf")
+            for (e, n) in tees:
+                d = math.hypot(E_cur - e, N_cur - n)
+                if d < dmin:
+                    dmin = d
 
-    return True
+            if dmin < best_dist:
+                best_dist = dmin
+                best = CandidateResult(hole_row=row, tee_min_dist_m=dmin)
+
+        return best
+
+    # ---------- cumulation ----------
+
+    def _append_sample(self, ts: float, is_in: bool):
+        """
+        Add sample with dt computed from last_ts.
+        """
+        if self._last_ts is None:
+            dt = 0.0
+        else:
+            dt = max(0.0, ts - self._last_ts)
+        self._last_ts = ts
+        self._samples.append((ts, is_in, dt))
+
+        # prune old beyond window_seconds
+        self._prune(ts)
+
+    def _prune(self, now_ts: float):
+        window = self.cfg.window_seconds
+        # remove from left while too old
+        while self._samples and (now_ts - self._samples[0][0]) > window:
+            self._samples.popleft()
+
+    def _cum_in_seconds(self) -> float:
+        """
+        Sum dt where is_in==True within current window.
+        Note: dt is assigned to the sample at time ts, representing time since prev sample.
+        """
+        s = 0.0
+        for _ts, is_in, dt in self._samples:
+            if is_in:
+                s += dt
+        return s
+
+    # ---------- public API ----------
+
+    def reset(self):
+        """
+        외부에서 홀 확정 후 호출하여 상태 리셋(권장).
+        """
+        self._candidate_id = None
+        self._candidate_row = None
+        self._candidate_best_dist = float("inf")
+        self._samples.clear()
+        self._last_ts = None
+        self._search_enabled = False
+
+    def update(
+        self,
+        current_hole_row: Optional[pd.Series],
+        cur_lat: float,
+        cur_lng: float,
+        out_of_green_confirmed: bool,
+        green_polygon_EN: Optional[List[Tuple[float, float]]],
+        now_ts: Optional[float] = None,
+    ) -> Tuple[bool, Optional[pd.Series], Dict]:
+        """
+        Returns:
+          confirmed: bool
+          next_row: pd.Series | None
+          debug: dict
+        """
+        ts = time.time() if now_ts is None else float(now_ts)
+        dbg: Dict = {
+            "search_enabled": self._search_enabled,
+            "candidate": None,
+            "candidate_dist": None,
+            "cum_in": None,
+            "reason": None,
+        }
+
+        # transformer check
+        if self.tf is None:
+            dbg["reason"] = "transformer_none"
+            return False, None, dbg
+
+        # current EN
+        E_cur, N_cur = self.tf.transform(cur_lng, cur_lat)
+
+        # 3) out-of-green 확정 이후 + 그린 폴리곤 최소거리 >= 30m 일 때만 탐색 enable
+        if out_of_green_confirmed:
+            if green_polygon_EN:
+                d_green = point_polygon_min_distance(E_cur, N_cur, green_polygon_EN)
+            else:
+                d_green = float("inf")  # 폴리곤이 없으면 이 조건을 강제하기 어려우므로 탐색 허용
+            dbg["green_min_dist"] = d_green
+
+            if d_green >= self.cfg.min_green_exit_distance_m:
+                self._search_enabled = True
+            else:
+                self._search_enabled = False
+        else:
+            self._search_enabled = False
+
+        dbg["search_enabled"] = self._search_enabled
+
+        # 탐색 비활성 시: 후보/누적 상태를 느슨하게 리셋 (오탐 방지)
+        if not self._search_enabled:
+            self._candidate_id = None
+            self._candidate_row = None
+            self._candidate_best_dist = float("inf")
+            self._samples.clear()
+            self._last_ts = None
+            dbg["reason"] = "search_disabled"
+            return False, None, dbg
+
+        # 1) 티 클러스터 기반 후보 탐색 (T1~T6만)
+        cand = self._find_best_candidate(E_cur, N_cur, current_hole_row)
+        if cand is None:
+            dbg["reason"] = "no_candidate_in_db"
+            # 샘플은 누적할 필요가 없음
+            return False, None, dbg
+
+        # 후보 거리
+        cand_dist = cand.tee_min_dist_m
+
+        # 후보의 df index 추정(가능하면 name을 사용)
+        try:
+            cand_id = int(cand.hole_row.name)  # type: ignore
+        except Exception:
+            cand_id = None
+
+        dbg["candidate"] = cand_id
+        dbg["candidate_dist"] = cand_dist
+
+        # 후보 스위칭 정책 (히스테리시스)
+        if self._candidate_id is None:
+            # 최초 후보 설정
+            self._candidate_id = cand_id
+            self._candidate_row = cand.hole_row
+            self._candidate_best_dist = cand_dist
+            self._samples.clear()
+            self._last_ts = None
+        else:
+            # 동일 후보면 best dist 업데이트
+            if cand_id == self._candidate_id:
+                if cand_dist < self._candidate_best_dist:
+                    self._candidate_best_dist = cand_dist
+            else:
+                # 다른 후보가 더 확실히 가까워졌을 때만 교체
+                if cand_dist < (self._candidate_best_dist - self.cfg.switch_hysteresis_m):
+                    self._candidate_id = cand_id
+                    self._candidate_row = cand.hole_row
+                    self._candidate_best_dist = cand_dist
+                    self._samples.clear()
+                    self._last_ts = None
+
+        # 현재 후보에 대해 "티 클러스터 근접" 여부 판정
+        is_in = (cand_id == self._candidate_id) and (cand_dist <= self.cfg.tee_detect_threshold_m)
+
+        # 누적 샘플 추가
+        self._append_sample(ts, is_in)
+
+        cum_in = self._cum_in_seconds()
+        dbg["cum_in"] = cum_in
+        dbg["is_in"] = is_in
+        dbg["candidate_best_dist"] = self._candidate_best_dist
+
+        # 2) 누적 60초 만족 시 확정
+        if cum_in >= self.cfg.confirm_cum_seconds:
+            if self._candidate_row is not None:
+                dbg["reason"] = "confirmed"
+                return True, self._candidate_row, dbg
+
+        dbg["reason"] = "not_confirmed"
+        return False, None, dbg

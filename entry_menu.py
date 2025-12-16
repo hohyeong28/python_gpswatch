@@ -356,32 +356,29 @@ class GolfWatchApp:
         # scorecard == "안함"
         parent = ctx["parent_window"]
         try:
-            ok = parent.find_next_hole()
+            # [수정] out-of-green 확정 시점 트리거(미사용 시) -> notify_out_of_green_confirmed
+            if hasattr(parent, "notify_out_of_green_confirmed"):
+                parent.notify_out_of_green_confirmed()
+            else:
+                # 호환: 기존 메서드가 남아있다면 호출
+                parent.find_next_hole()
         except Exception as e:
-            print("[ENTRY] find_next_hole error:", e)
-            ok = False
+            print("[ENTRY] notify_out_of_green_confirmed error:", e)
 
-        if not ok:
-            self.manager.show("menu")
-            return
-
+        # 탐색은 PlayGolfFrame 내부 루프가 수행, 화면은 distance로 복귀
         self.manager.show("distance")
         self.distance_screen.start()
 
     def _on_scoring_done(self, result: dict):
         print("[ENTRY] scoring done:", result)
 
-        # 스코어 저장은 추후 확장
-        # 다음 홀 진행
+        # [수정] scorecard 사용 시 OK가 홀 종료 확정이므로 이 시점에 next hole 탐색 트리거
         try:
-            ok = self.playgolf_screen.find_next_hole()
-            if not ok:
-                self.manager.show("menu")
-                return
+            self.playgolf_screen.notify_out_of_green_confirmed()
         except Exception as e:
-            print("[ENTRY] find_next_hole error:", e)
-            self.manager.show("menu")
-            return
+            print("[ENTRY] notify_out_of_green_confirmed error:", e)
 
-        # 다음 홀로 정상 진행 (현재는 playgolf로 이동)
-        self.manager.show("playgolf")
+        # 다음 홀 확정/전환은 PlayGolfFrame 내부에서 on_open_distance 콜백으로 수행됨
+        # 사용자는 거리 화면으로 복귀해 계속 진행
+        self.manager.show("distance")
+        self.distance_screen.start()
