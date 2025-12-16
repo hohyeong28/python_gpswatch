@@ -99,13 +99,13 @@ def point_polygon_min_distance(px: float, py: float, polygon: List[Tuple[float, 
 @dataclass
 class NextHoleConfig:
     # 티 클러스터 근접 임계값 (m)
-    tee_detect_threshold_m: float = 35.0
+    tee_detect_threshold_m: float = 20.0
 
     # 후보 확정 누적 시간 (s)
-    confirm_cum_seconds: float = 60.0
+    confirm_cum_seconds: float = 2.0   # 60.0(60초) ==> 시뮬레이션을 위해 2초로 적용
 
     # 누적 계산 슬라이딩 윈도우 (s) : 90초 창에서 60초 이상 근접이면 확정(권장)
-    window_seconds: float = 90.0
+    window_seconds: float = 5.0   # 90.0(90초)  ==> 시뮬레이션을 위해 5초로 적용
 
     # out-of-green 이후 다음 홀 탐색 시작 조건: 그린 폴리곤 최소거리 >= 30m
     min_green_exit_distance_m: float = 30.0
