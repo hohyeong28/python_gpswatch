@@ -4,6 +4,7 @@
 # - 단일 윈도우에서 ScreenManager로 전환되는 구조 지원
 # - 외부에서 set_context(...)로 초기화 후 start() 호출 형태
 # - GreenView / Putt 전환은 콜백(on_open_green_view, on_open_putt)으로 처리
+# - LayupView 전환 콜백(on_open_layup_view) 추가
 # - 단독 실행 코드 제거
 
 import math
@@ -46,6 +47,7 @@ class DistanceScreen(tk.Frame):
     외부 연결(필수):
       - on_back(): 이전 화면(예: PlayGolf)로 복귀
       - on_open_green_view(context): GreenView 화면으로 전환
+      - on_open_layup_view(context): LayupView 화면으로 전환
       - on_open_putt(context): PuttDistance 화면으로 전환
 
     context 전달 내용:
@@ -57,6 +59,7 @@ class DistanceScreen(tk.Frame):
         master: tk.Misc,
         on_back: Optional[Callable[[], None]] = None,
         on_open_green_view: Optional[Callable[[dict], None]] = None,
+        on_open_layup_view: Optional[Callable[[dict], None]] = None,
         on_open_putt: Optional[Callable[[dict], None]] = None,
     ):
         super().__init__(master, width=LCD_WIDTH, height=LCD_HEIGHT, bg="black")
@@ -64,6 +67,7 @@ class DistanceScreen(tk.Frame):
 
         self.on_back = on_back
         self.on_open_green_view = on_open_green_view
+        self.on_open_layup_view = on_open_layup_view
         self.on_open_putt = on_open_putt
 
         # 외부에서 주입되는 컨텍스트
@@ -112,6 +116,9 @@ class DistanceScreen(tk.Frame):
 
         # Back 터치(좌상단)
         self._draw_back_hitbox()
+
+        # LayupView 버튼 (좌측 배치)
+        self.layupview_button = tk.Button(self, text="LayupView", command=self._on_layup_view)
 
         # GreenView 버튼(요구 유지: 400x400)
         self.greenview_button = tk.Button(self, text="GreenView", command=self._on_green_view)
@@ -507,6 +514,8 @@ class DistanceScreen(tk.Frame):
         if dist_info["mode"] == "corrected":
             self._draw_slope_indicator(dist_info["diff_h"])
 
+        # LayupView 버튼(좌측) + GreenView 버튼(우측) 배치
+        self.canvas.create_window(70, 400, window=self.layupview_button)
         self.canvas.create_window(400, 400, window=self.greenview_button)
 
     def _draw_top_bar(self):
@@ -590,6 +599,23 @@ class DistanceScreen(tk.Frame):
         self.canvas.create_image(LCD_WIDTH - 115, LCD_HEIGHT // 2 - 30, image=img)
         self.canvas.create_text(LCD_WIDTH - 110, LCD_HEIGHT // 2 - 70, text=f"{int(round(diff_h)):+d}",
                                 fill="white", font=("Helvetica", 25, "bold"))
+
+    # ---------- LayupView ---------- #
+
+    def _on_layup_view(self):
+        if not callable(self.on_open_layup_view):
+            return
+        ctx = dict(
+            parent_window=self.parent_window,
+            hole_row=self.hole_row,
+            gc_center_lat=self.gc_center_lat,
+            gc_center_lng=self.gc_center_lng,
+            cur_lat=self.cur_lat,
+            cur_lng=self.cur_lng,
+            selected_green=self.selected_green,
+        )
+        self.stop()
+        self.on_open_layup_view(ctx)
 
     # ---------- GreenView ---------- #
 

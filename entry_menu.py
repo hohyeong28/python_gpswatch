@@ -12,6 +12,7 @@ import playgolf
 
 from measure_distance import DistanceScreen
 from green_view import GreenViewScreen
+from layup_view import LayupViewScreen   # [추가]
 from meas_putt_distance import PuttDistanceScreen
 from scoring import ScoringScreen
 
@@ -192,17 +193,23 @@ class GolfWatchApp:
             on_back=lambda: self.manager.show("menu"),
         )
 
-        # distance / green / putt (Frame)
+        # distance / green / layup / putt (Frame)
         self.distance_screen = DistanceScreen(
             self.manager,
             on_back=self._back_to_playgolf_from_distance,
             on_open_green_view=self._open_green_view_from_distance,
+            on_open_layup_view=self._open_layup_view_from_distance,  # [추가]
             on_open_putt=self._open_putt_from_distance,
         )
 
         self.green_view_screen = GreenViewScreen(
             self.manager,
             on_back=self._back_to_distance_from_green,
+        )
+
+        self.layup_view_screen = LayupViewScreen(  # [추가]
+            self.manager,
+            on_back=self._back_to_distance_from_layup,
         )
 
         self.putt_screen = PuttDistanceScreen(
@@ -225,6 +232,7 @@ class GolfWatchApp:
         self.manager.add("playgolf", self.playgolf_screen)
         self.manager.add("distance", self.distance_screen)
         self.manager.add("green", self.green_view_screen)
+        self.manager.add("layup", self.layup_view_screen)  # [추가]
         self.manager.add("putt", self.putt_screen)
         self.manager.add("scoring", self.scoring_screen)
         self.manager.add("history", self.history_screen)
@@ -292,6 +300,29 @@ class GolfWatchApp:
         self.manager.show("distance")
         self.distance_screen.start()
 
+    # ----------------- [추가] LayupView 전환 핸들러 ----------------- #
+
+    def _open_layup_view_from_distance(self, ctx: dict):
+        self.distance_screen.stop()
+        self.layup_view_screen.set_context(
+            parent_window=ctx["parent_window"],
+            hole_row=ctx["hole_row"],
+            gc_center_lat=ctx["gc_center_lat"],
+            gc_center_lng=ctx["gc_center_lng"],
+            cur_lat=ctx["cur_lat"],
+            cur_lng=ctx["cur_lng"],
+            selected_green=ctx["selected_green"],
+        )
+        self.manager.show("layup")
+        self.layup_view_screen.start()
+
+    def _back_to_distance_from_layup(self):
+        self.layup_view_screen.stop()
+        self.manager.show("distance")
+        self.distance_screen.start()
+
+    # ------------------------------------------------ #
+
     def _open_putt_from_distance(self, ctx: dict):
         self.distance_screen.stop()
         self.putt_screen.set_context(
@@ -354,6 +385,3 @@ class GolfWatchApp:
 
         # 다음 홀로 정상 진행 (현재는 playgolf로 이동)
         self.manager.show("playgolf")
-
-
-
