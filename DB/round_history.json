@@ -1,0 +1,32 @@
+[
+  {
+    "date": "2025-12-17",
+    "gc_name": "남서울CC",
+    "total_score": 38,
+    "total_par_score": 5,
+    "total_putt": 17,
+    "gir_pct": 75.0,
+    "duration_sec": 763,
+    "steps": 3844
+  },
+  {
+    "date": "2025-12-17",
+    "gc_name": "남서울CC",
+    "total_score": 0,
+    "total_par_score": 0,
+    "total_putt": 0,
+    "gir_pct": 0.0,
+    "duration_sec": 17,
+    "steps": 3844
+  },
+  {
+    "date": "2025-12-18",
+    "gc_name": "남서울CC",
+    "total_score": 0,
+    "total_par_score": 0,
+    "total_putt": 0,
+    "gir_pct": 0.0,
+    "duration_sec": 23,
+    "steps": 3844
+  }
+]
