@@ -93,7 +93,6 @@ class ScorecardScreen(tk.Frame):
         for attr in ("round_scores", "scorecard_scores", "scores_by_hole"):
             d = getattr(self.parent_window, attr, None)
             if isinstance(d, dict):
-                # 키가 int가 아닐 수 있어도 정렬은 가능하도록 변환 시도는 렌더에서 처리
                 return d
         return {}
 
@@ -203,7 +202,7 @@ class ScorecardScreen(tk.Frame):
         self._clamp_start_index()
         self._render()
 
-    # ---------------- rendering ---------------- #
+    # ---------------- rendering helpers ---------------- #
 
     def load_image(self, filename: str, size: Optional[Tuple[int, int]] = None) -> ImageTk.PhotoImage:
         key = (filename, size)
@@ -221,6 +220,39 @@ class ScorecardScreen(tk.Frame):
         photo = ImageTk.PhotoImage(img)
         self.images[key] = photo
         return photo
+
+    def _draw_scroll_dots(self):
+        """
+        하단 중앙에 페이지 점 표시(스크롤 가능할 때만).
+        - 총 페이지 수 = ceil(len(rows)/ROWS_PER_PAGE)
+        - 현재 페이지 = start_index // ROWS_PER_PAGE
+        """
+        total = len(self._rows)
+        if total <= self.ROWS_PER_PAGE:
+            return
+
+        pages = (total + self.ROWS_PER_PAGE - 1) // self.ROWS_PER_PAGE
+        cur_page = self._start_index // self.ROWS_PER_PAGE
+        cur_page = max(0, min(cur_page, pages - 1))
+
+        cx = LCD_WIDTH // 2
+        y = LCD_HEIGHT - 28
+
+        r = 3
+        gap = 10
+        total_w = (pages - 1) * gap
+        x0 = cx - total_w / 2
+
+        for i in range(pages):
+            x = x0 + i * gap
+            if i == cur_page:
+                fill = "#E0E0E0"   # 현재 페이지(밝게)
+                outline = "#E0E0E0"
+            else:
+                fill = "#606060"   # 나머지(은은하게)
+                outline = "#606060"
+
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline)
 
     def _render(self):
         self.canvas.delete("all")
@@ -288,12 +320,5 @@ class ScorecardScreen(tk.Frame):
             self.canvas.create_text(col_x[2], y, text=str(r["score"]), fill="#2BBF3F", font=("Helvetica", 18, "bold"))
             self.canvas.create_text(col_x[3], y, text=str(r["putt_score"]), fill="white", font=("Helvetica", 18, "bold"))
 
-        # scroll indicator (optional, subtle)
-        if len(self._rows) > self.ROWS_PER_PAGE:
-            # show "start-end / total"
-            self.canvas.create_text(
-                cx, LCD_HEIGHT - 35,
-                text=f"{start+1}-{end} / {len(self._rows)}",
-                fill="white",
-                font=("Helvetica", 12, "bold"),
-            )
+        # 하단 중앙 점(스크롤 가능 여부) 표시
+        self._draw_scroll_dots()

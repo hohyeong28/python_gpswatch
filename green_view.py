@@ -11,6 +11,12 @@
 # [반영]
 # - DistanceScreen에서 전달된 selected_green(L/R) 표시
 # - 그린 contour를 더 부드럽게: (각도 정렬) + Chaikin 스무딩(iterations=2)
+# - (요청) width/height 텍스트 위치를 점선과 연동(원안): width는 y만, height는 x만 연동
+# - (요청) 폴리곤 outline 두께 = 6
+# - (추가) 엔트리 표기: entry( front_to_pin ) => 137(15)
+#          137 = 현재→그린입구, 15 = 그린입구→핀
+# - (정책 변경) PIN 모드는 "사용자가 핀을 클릭해 변경"했을 때만 확정(= parent 저장)
+# - (정책 변경) GreenView 진입/기본 pin(center) 상태에서는 parent에 저장하지 않음
 
 import math
 from pathlib import Path
@@ -126,10 +132,6 @@ def sort_points_by_angle(points: List[Tuple[float, float]], center: Tuple[float,
 
 
 def chaikin_smooth_closed(points: List[Tuple[float, float]], iterations: int = 2) -> List[Tuple[float, float]]:
-    """
-    Chaikin corner-cutting for a closed polyline.
-    - iterations=2 적용
-    """
     if len(points) < 3:
         return points
 
@@ -189,6 +191,9 @@ class GreenViewScreen(tk.Frame):
         self.green_points: List[Tuple[float, float]] = []
         self.pin_EN: Tuple[float, float] = (0.0, 0.0)
 
+        # pin mode state (사용자 클릭으로만 True)
+        self.pin_user_selected: bool = False
+
         # inverse transform cache
         self._last_cos = 1.0
         self._last_sin = 0.0
@@ -228,7 +233,12 @@ class GreenViewScreen(tk.Frame):
         self.center_EN, self.center_alt = self._get_green_center_and_alt()
         self.green_points = self._get_green_points()
 
-        self.pin_EN = (self.center_EN[0], self.center_EN[1])  # 기본 pin = center
+        # 기본 pin = center (이 상태는 PIN 모드 확정 아님)
+        self.pin_EN = (self.center_EN[0], self.center_EN[1])
+        self.pin_user_selected = False
+
+        # parent에 저장된 pin이 있으면 복원(= 이미 PIN 모드가 확정된 상태로 간주)
+        self._restore_pin_from_parent()
 
     def start(self):
         self.stop()
@@ -242,6 +252,58 @@ class GreenViewScreen(tk.Frame):
             except Exception:
                 pass
             self._after_id = None
+
+    # ---------- pin sync ---------- #
+
+    def _current_hole_no(self) -> int:
+        try:
+            if self.hole_row is None:
+                return 0
+            return int(self.hole_row.get("Hole", 0) or 0)
+        except Exception:
+            return 0
+
+    def _store_pin_to_parent(self):
+        """
+        사용자 클릭으로 pin을 변경했을 때만 저장(= PIN 모드 확정).
+        """
+        if self.parent_window is None:
+            return
+        try:
+            self.parent_window.selected_pin_info = {
+                "hole": self._current_hole_no(),
+                "pin_EN": (float(self.pin_EN[0]), float(self.pin_EN[1])),
+                "enabled": True,
+            }
+        except Exception as e:
+            print("[GreenViewScreen] store pin error:", e)
+
+    def _restore_pin_from_parent(self):
+        """
+        같은 홀이면 parent_window의 핀을 복원한다.
+        - green은 운영 정책상 고려하지 않음(사용자가 L/R 변경하지 않는 전제).
+        """
+        if self.parent_window is None:
+            return
+        info = getattr(self.parent_window, "selected_pin_info", None)
+        if not isinstance(info, dict):
+            return
+        if not info.get("enabled", False):
+            return
+
+        hole_no = self._current_hole_no()
+        if info.get("hole") != hole_no:
+            return
+
+        pin = info.get("pin_EN")
+        if (
+            isinstance(pin, (list, tuple))
+            and len(pin) == 2
+            and isinstance(pin[0], (int, float))
+            and isinstance(pin[1], (int, float))
+        ):
+            self.pin_EN = (float(pin[0]), float(pin[1]))
+            self.pin_user_selected = True
 
     # ---------- loop ---------- #
 
@@ -324,17 +386,12 @@ class GreenViewScreen(tk.Frame):
     # ---------- L/R indicator ---------- #
 
     def _draw_green_indicator(self):
-        """
-        DistanceScreen에서 전달된 selected_green(L/R)을 표시한다.
-        RG가 없는 홀은 의미상 L만 표시.
-        """
         has_rg = self._check_rg_exists()
         if not has_rg:
             return
 
         label = self.selected_green if has_rg else "L"
 
-        # 표시 위치/크기 (필요 시 조정)
         cx, cy = 105, 145
         r = 22
         self.canvas.create_oval(
@@ -349,7 +406,6 @@ class GreenViewScreen(tk.Frame):
     # ---------- click pin ---------- #
 
     def _on_canvas_click(self, event):
-        # STOP 버튼 클릭 영역은 버튼 위젯이 처리
         if self._last_scale <= 0:
             return
 
@@ -371,6 +427,11 @@ class GreenViewScreen(tk.Frame):
             return
 
         self.pin_EN = (x_world, y_world)
+
+        # 사용자 클릭 → PIN 모드 확정(= parent 저장)
+        self.pin_user_selected = True
+        self._store_pin_to_parent()
+
         self._compute_geometry_and_draw()
 
     # ---------- draw ---------- #
@@ -383,19 +444,16 @@ class GreenViewScreen(tk.Frame):
         except FileNotFoundError:
             pass
 
-        # L/R 표시 (배경 위)
         self._draw_green_indicator()
 
         if not self.green_points:
             return
 
-        # world -> rel(center)
         Cx, Cy = self.center_EN
         G_rel = [(x - Cx, y - Cy) for (x, y) in self.green_points]
         cur_rel = (self.E_cur - Cx, self.N_cur - Cy)
         pin_rel = (self.pin_EN[0] - Cx, self.pin_EN[1] - Cy)
 
-        # B안 회전각: 현재→center가 12시
         v = (-cur_rel[0], -cur_rel[1])
         angle_v = 0.0 if v == (0.0, 0.0) else math.atan2(v[1], v[0])
         theta = (math.pi / 2) - angle_v
@@ -409,16 +467,13 @@ class GreenViewScreen(tk.Frame):
             x, y = p
             return (x * cos_t - y * sin_t, x * sin_t + y * cos_t)
 
-        # 회전 좌표계로 변환
         G_rot_raw = [rot(p) for p in G_rel]
         cur_rot = rot(cur_rel)
         pin_rot = rot(pin_rel)
 
-        # contour 부드럽게: 각도 정렬 + Chaikin(iterations=2)
         G_rot_sorted = sort_points_by_angle(G_rot_raw, center=(0.0, 0.0))
         G_rot = chaikin_smooth_closed(G_rot_sorted, iterations=2)
 
-        # scale
         xs = [p[0] for p in G_rot]
         ys = [p[1] for p in G_rot]
         width = max(xs) - min(xs)
@@ -466,7 +521,6 @@ class GreenViewScreen(tk.Frame):
         flat_entry = dist(P0, p_front)
         flat_center_to_pin = dist(P0, Pin)
 
-        # entry_distance same logic as measure_distance
         parent_alt = getattr(self.parent_window, "altitude", 0.0) if self.parent_window else 0.0
         alt_offset = getattr(self.parent_window, "alt_offset", 0.0) if self.parent_window else 0.0
         current_alt = parent_alt - alt_offset
@@ -487,7 +541,9 @@ class GreenViewScreen(tk.Frame):
         conv = 1.0 if unit == "M" else 1.09361
         entry_display = int(round(entry_distance * conv))
 
-        # near-green auto return
+        front_to_pin = dist(p_front, Pin)
+        front_to_pin_display = int(round(front_to_pin * conv))
+
         if entry_display <= 20:
             self.canvas.create_text(LCD_WIDTH // 2, LCD_HEIGHT // 2, text="그린 근처입니다",
                                     fill="white", font=("Helvetica", 30, "bold"))
@@ -539,19 +595,16 @@ class GreenViewScreen(tk.Frame):
         length_display = int(round(green_pin_length * conv))
         width_display = int(round(width_val * conv))
 
-        # draw contour (smooth)
         contour = []
         for p in G_rot:
             sx, sy = to_screen(p)
             contour.extend([sx, sy])
-        self.canvas.create_polygon(contour, fill="#90EE90", outline="white", width=3)
+        self.canvas.create_polygon(contour, fill="#90EE90", outline="white", width=6)
 
-        # pin dot
         pin_s = to_screen(pin_rot)
         self.canvas.create_oval(pin_s[0] - 4, pin_s[1] - 4, pin_s[0] + 4, pin_s[1] + 4,
                                 fill="red", outline="red")
 
-        # cross lines
         l1 = to_screen(len_p1)
         l2 = to_screen(len_p2)
         self.canvas.create_line(l1[0], l1[1], l2[0], l2[1], fill="red", dash=(4, 4), width=2)
@@ -560,7 +613,6 @@ class GreenViewScreen(tk.Frame):
         w2 = to_screen(p4)
         self.canvas.create_line(w1[0], w1[1], w2[0], w2[1], fill="red", dash=(4, 4), width=2)
 
-        # entry triangle
         pf_s = to_screen(p_front)
         tip = pf_s
         dir_tri = (pin_s[0] - tip[0], pin_s[1] - tip[1])
@@ -573,28 +625,47 @@ class GreenViewScreen(tk.Frame):
         right = (base_center[0] - pxv * (tri_width / 2), base_center[1] - pyv * (tri_width / 2))
         self.canvas.create_polygon([tip[0], tip[1], left[0], left[1], right[0], right[1]], fill="red", outline="red")
 
-        # entry text (fixed HUD position)
+        # entry HUD
         entry_text_x = cx
-        entry_text_y = 400  # 원하는 고정 위치로 조정 (예: 상단 바 아래)
+        entry_text_y = 400
+
         self.canvas.create_text(
             entry_text_x, entry_text_y,
             text=f"{entry_display}",
             fill="white",
-            font=("Helvetica", 32, "bold")
+            font=("Helvetica", 32, "bold"),
+            anchor="e"
+        )
+        self.canvas.create_text(
+            entry_text_x, entry_text_y - 2,
+            text=f"({front_to_pin_display})",
+            fill="white",
+            font=("Helvetica", 24, "bold"),
+            anchor="w"
         )
 
-        # top/right numbers
-        radius = LCD_WIDTH / 2
-        self.canvas.create_text(cx, cy - radius + 80, text=f"{length_display}", fill="white", font=("Helvetica", 26, "bold"))
-        self.canvas.create_text(cx + radius - 80, cy, text=f"{width_display}", fill="white", font=("Helvetica", 26, "bold"))
+        l_mid_x = (l1[0] + l2[0]) / 2.0
+        w_mid_y = (w1[1] + w2[1]) / 2.0
 
-        # hole/par
+        radius = LCD_WIDTH / 2
+        self.canvas.create_text(
+            l_mid_x, cy - radius + 80,
+            text=f"{length_display}",
+            fill="white",
+            font=("Helvetica", 26, "bold")
+        )
+        self.canvas.create_text(
+            cx + radius - 80, w_mid_y,
+            text=f"{width_display}",
+            fill="white",
+            font=("Helvetica", 26, "bold")
+        )
+
         hole = int(self.hole_row.get("Hole", 0)) if self.hole_row is not None else 0
         par = int(self.hole_row.get("PAR", 0)) if self.hole_row is not None else 0
         self.canvas.create_text(cx - radius + 80, cy - 20, text=f"H{hole}", fill="white", font=("Helvetica", 22, "bold"))
         self.canvas.create_text(cx - radius + 80, cy + 20, text=f"P{par}", fill="white", font=("Helvetica", 22, "bold"))
 
-        # STOP button
         self.canvas.create_window(400, 400, window=self.stop_button)
 
     def _on_stop(self):

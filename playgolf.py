@@ -1,30 +1,8 @@
 # playgolf.py (Frame + on_open_distance 콜백 버전)
 #
-# [기존 기능 유지]
-# - 새 윈도우 생성 없음(Toplevel 없음)
-# - GPS 시뮬레이터(simul_gps.py)는 Play Golf 화면 "선택 후(start 호출)"부터 실행
-# - BACK/화면 이탈 시 stop()으로 GPS 시뮬레이터 및 after 루프 종료
-# - find_1st_hole()에서 DistanceScreen 전환은 ScreenManager 콜백(on_open_distance)으로 위임
-# - FindSat/GC 탐색/1st hole fix/alt_offset 계산/화면 전환 흐름 유지
-#
-# [적용된 제안 사항(모두 반영)]
-# - find_next_hole 로직은 find_next_hole.py(NextHoleFinder) 기반으로 PlayGolfFrame에서 수행
-#   1) 티 클러스터 방식(T1~T6 최소거리) 사용
-#   2) 누적 체류(기본 60초/윈도 90초 등)는 NextHoleFinder 내부에서 계산/판정
-#   3) out-of-green 확정 + 그린 폴리곤 최소거리 30m 이상 이탈 후 탐색 활성화(NextHoleFinder)
-# - 평상시에는 60초 주기(after)로 next-hole 판단
-# - out_of_green_confirmed가 True가 되면:
-#     * 60초 after 모니터링을 중지하고
-#     * 매 GPS 샘플(on_gps_update)마다 next-hole 판단을 수행
-# - 홀 확정 시:
-#     * current_hole_row 갱신
-#     * alt_offset 재계산(기존 로직 유지)
-#     * out_of_green_confirmed 리셋
-#     * 다시 60초 after 모니터링 재개
-#
-# 주의:
-# - NextHoleConfig의 단축(예: 2초/5초)은 find_next_hole.py에서 조정하면 반영됩니다.
-#   (이 파일에서는 config를 하드코딩하지 않고 NextHoleFinder 기본값을 사용)
+# [추가/수정]
+# - 1st hole fix 확정 시점에 round_start_time 저장(최초 1회)
+# - scorecard 사용 시 scoring 결과 누적 저장을 위한 round_scores dict 유지
 
 import math
 import time
@@ -44,7 +22,7 @@ from simul_gps import GPSSimulator
 from find_next_hole import NextHoleFinder
 
 threshold_dist = 20
-sim_gps_file = "안양CC.xlsx"
+sim_gps_file = "남서울CC_out.xlsx"
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -109,10 +87,16 @@ class PlayGolfFrame(tk.Frame):
         self.alt_offset: float = 0.0
         self.last_green: str = "L"
 
+        # 라운드 시작 시간(1st hole fix 시점 기록)
+        self.round_start_time: Optional[float] = None
+
+        # 홀별 스코어 저장소(Scoring 완료 시 entry_menu에서 채움)
+        self.round_scores: Dict[int, dict] = {}
+
         # 현재 홀 row (1st hole fix 후 저장)
         self.current_hole_row: Optional[pd.Series] = None
 
-        # out-of-green 확정 플래그 (putt/score 흐름에서 세팅)
+        # out-of-green 확정 플래그
         self.out_of_green_confirmed: bool = False
 
         # NextHoleFinder 및 루프 제어
@@ -150,11 +134,11 @@ class PlayGolfFrame(tk.Frame):
         self.find_sat_image_id = None
         self.gc_text_id = None
 
-        # GPS simulator (생성만 하고 start는 start()에서)
+        # GPS simulator
         self.gps_sim: Optional[GPSSimulator] = None
         self._gps_started: bool = False
 
-        # after() 예약 id들(화면 이탈 시 cancel)
+        # after 예약 id들
         self._after_find_sat: Optional[str] = None
         self._after_find_gc: Optional[str] = None
         self._after_move_to_tee: Optional[str] = None
@@ -166,21 +150,19 @@ class PlayGolfFrame(tk.Frame):
     # ---------------- lifecycle ---------------- #
 
     def start(self):
-        """
-        entry_menu(ScreenManager)에서 playgolf 화면으로 전환될 때 호출.
-        - GPS 시뮬레이터 start
-        - FindSat UI 표시 및 5초 후 GC 탐색 시작
-        """
         if self._running:
             return
         self._running = True
 
-        # GPS sim 생성/시작
+        # 새 라운드 시작으로 간주: round_start_time은 1st hole fix 시 설정
+        # score 누적은 라운드 동안 유지(원하면 여기서 초기화 가능)
+        # self.round_scores = {}
+
         if self.gps_sim is None:
             gps_file = self.base_dir / sim_gps_file
             self.gps_sim = GPSSimulator(
                 excel_path=gps_file,
-                tk_root=self,      # after() 호출용
+                tk_root=self,
                 on_update=self.on_gps_update,
             )
 
@@ -188,31 +170,20 @@ class PlayGolfFrame(tk.Frame):
             self.gps_sim.start()
             self._gps_started = True
 
-        # FindSat 시작
         self.show_find_sat()
-
-        # 5초 후 GC 탐색으로 전환
         self._cancel_after(self._after_find_sat)
         self._after_find_sat = self.after(5000, self.on_find_sat_finished)
 
     def stop(self):
-        """
-        entry_menu(ScreenManager)에서 playgolf 화면을 떠날 때 호출.
-        - GPS 시뮬레이터 stop
-        - 예약된 after() 모두 취소
-        """
         self._running = False
 
-        # after 취소
         self._cancel_after(self._after_find_sat); self._after_find_sat = None
         self._cancel_after(self._after_find_gc); self._after_find_gc = None
         self._cancel_after(self._after_move_to_tee); self._after_move_to_tee = None
         self._cancel_after(self._after_find_hole); self._after_find_hole = None
 
-        # next hole 모니터링 취소
         self._stop_next_hole_monitor()
 
-        # GPS sim stop
         try:
             if self.gps_sim is not None and self._gps_started:
                 self.gps_sim.stop()
@@ -252,8 +223,6 @@ class PlayGolfFrame(tk.Frame):
             f"lat={self.latitude:.6f}, lng={self.longitude:.6f}, alt={self.altitude}"
         )
 
-        # [핵심 변경] out-of-green 이후에는 60초 after를 쓰지 않고,
-        # 매 GPS 샘플마다 next-hole 판단을 수행한다.
         if self._running and self.out_of_green_confirmed:
             self._next_hole_tick(force=True)
 
@@ -555,7 +524,11 @@ class PlayGolfFrame(tk.Frame):
         if best_row is None:
             return False
 
-        # alt_offset 계산(기존 유지)
+        # 라운드 시작 시각(1st hole fix 시점) 기록: 최초 1회만
+        if self.round_start_time is None:
+            self.round_start_time = time.time()
+
+        # alt_offset 계산
         self.alt_offset = self._compute_alt_offset_for_row(best_row, E_cur, N_cur)
 
         # 현재 홀 저장 및 next-hole 모니터링 초기화/시작
@@ -564,7 +537,6 @@ class PlayGolfFrame(tk.Frame):
         self._init_next_hole_finder_if_needed()
         self._start_next_hole_monitor()
 
-        # ---- ScreenManager에 위임 ----
         if not callable(self.on_open_distance):
             print("[find_1st_hole] on_open_distance 콜백이 없습니다.")
             return False
@@ -583,21 +555,11 @@ class PlayGolfFrame(tk.Frame):
     # ---------------- next hole trigger ---------------- #
 
     def notify_out_of_green_confirmed(self):
-        """
-        putt_distance / scoring 흐름에서 호출:
-        - out-of-green 확정 상태로 전환
-        - 평상시 60초 after 모니터링을 중지
-        - 이후는 on_gps_update()에서 매 GPS 샘플마다 _next_hole_tick()이 수행됨
-        """
         self.out_of_green_confirmed = True
         self._stop_next_hole_monitor()
         self._next_hole_tick(force=True)
 
     def find_next_hole(self) -> bool:
-        """
-        (호환용) 기존 호출부가 남아있을 수 있으므로 유지.
-        내부적으로 notify_out_of_green_confirmed()를 호출한다.
-        """
         if self.gc_df is None or self.gc_df.empty:
             return False
         if self.gc_center_lat is None or self.gc_center_lng is None:
@@ -617,15 +579,9 @@ class PlayGolfFrame(tk.Frame):
             return
         if self.gc_center_lat is None or self.gc_center_lng is None:
             return
-
-        # config는 하드코딩하지 않고 NextHoleFinder 기본값 사용(시뮬레이션 단축도 반영됨)
         self._next_finder = NextHoleFinder(self.gc_df, self.gc_center_lat, self.gc_center_lng)
 
     def _start_next_hole_monitor(self):
-        """
-        평상시(60초) 주기 모니터링.
-        out_of_green_confirmed=True 상태에서는 GPS 기반으로 수행하므로 after 모니터링은 사용하지 않는다.
-        """
         if not self._running:
             return
         if self.out_of_green_confirmed:
@@ -643,10 +599,6 @@ class PlayGolfFrame(tk.Frame):
         self._after_next_hole = None
 
     def _get_selected_green_polygon_EN(self) -> List[Tuple[float, float]]:
-        """
-        현재 홀(current_hole_row)과 last_green(L/R)을 기준으로 그린 폴리곤(ENU) 반환.
-        - 스무딩 전 원본 포인트(LG1~LG20 / RG1~RG20)를 사용한다.
-        """
         if self.current_hole_row is None:
             return []
         row = self.current_hole_row
@@ -662,11 +614,6 @@ class PlayGolfFrame(tk.Frame):
         return pts
 
     def _next_hole_tick(self, force: bool = False):
-        """
-        NextHoleFinder.update() 호출 및 확정 처리.
-        - 평상시: after(60초)에서 호출
-        - out_of_green_confirmed=True: on_gps_update()에서 매 GPS 샘플마다 호출
-        """
         if not self._running:
             return
 
@@ -690,7 +637,6 @@ class PlayGolfFrame(tk.Frame):
             now_ts=time.time(),
         )
 
-        # 확정 처리
         if confirmed and (next_row is not None):
             prev_hole = self.current_hole_row.get("Hole") if self.current_hole_row is not None else None
             next_hole = next_row.get("Hole")
@@ -702,7 +648,6 @@ class PlayGolfFrame(tk.Frame):
 
             self.current_hole_row = next_row
 
-            # EN 좌표 계산(alt_offset 재계산용)
             tf = make_transformer(self.gc_center_lat, self.gc_center_lng) if (self.gc_center_lat is not None and self.gc_center_lng is not None) else None
             if tf is not None:
                 E_cur, N_cur = tf.transform(self.longitude, self.latitude)
@@ -710,16 +655,13 @@ class PlayGolfFrame(tk.Frame):
             else:
                 self.alt_offset = 0.0
 
-            # 새 홀 시작: out-of-green 리셋
             self.out_of_green_confirmed = False
 
-            # finder 상태 리셋
             try:
                 self._next_finder.reset()
             except Exception:
                 pass
 
-            # measure_distance 재실행(콜백 위임)
             if callable(self.on_open_distance):
                 ctx = dict(
                     parent_window=self,
@@ -731,26 +673,17 @@ class PlayGolfFrame(tk.Frame):
                 )
                 self.on_open_distance(ctx)
 
-            # 평상시 60초 모니터링 재개
             self._start_next_hole_monitor()
             return
 
-        # 확정이 아니면:
-        # - out_of_green_confirmed=True일 때는 GPS 기반으로 계속 호출되므로 after 스케줄링을 하지 않는다.
-        # - out_of_green_confirmed=False일 때는 평상시 60초 after를 유지한다.
         if not self.out_of_green_confirmed:
             self._start_next_hole_monitor()
 
-        _ = (dbg, force)  # 디버그/force는 필요시 로깅 확장에 사용
+        _ = (dbg, force)
 
-    # ---------------- alt_offset util (기존 로직 유지) ---------------- #
+    # ---------------- alt_offset util ---------------- #
 
     def _compute_alt_offset_for_row(self, hole_row: pd.Series, E_cur: float, N_cur: float) -> float:
-        """
-        기존 find_1st_hole의 alt_offset 계산 로직을 동일하게 재사용:
-        - fix_labels(T1~T6, IP1, IP2) 중 현재 위치에서 가장 가까운 점의 dAlt 사용
-        - alt_offset = (현재고도 - DB고도)
-        """
         def get_point(row, label: str):
             e = row.get(f"{label}_E", np.nan)
             n = row.get(f"{label}_N", np.nan)

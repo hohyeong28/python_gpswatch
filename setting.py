@@ -97,7 +97,7 @@ class SettingsFrame(tk.Frame):
             font=("Helvetica", 26, "bold"),
         )
 
-        LABEL_X = 100
+        LABEL_X = 80
         self.canvas.create_text(LABEL_X, 170, text="단위  설정", fill="white", anchor="w", font=("Helvetica", 18))
         self.canvas.create_text(LABEL_X, 230, text="거리  안내", fill="white", anchor="w", font=("Helvetica", 18))
         self.canvas.create_text(LABEL_X, 290, text="스코어카드", fill="white", anchor="w", font=("Helvetica", 18))
@@ -113,22 +113,22 @@ class SettingsFrame(tk.Frame):
                                     command=lambda: self._set_unit("M"), borderwidth=2, highlightthickness=0)
         self.btn_unit_yd = tk.Button(self.canvas, text="Yd", width=btn_width, font=btn_font,
                                      command=lambda: self._set_unit("Yd"), borderwidth=2, highlightthickness=0)
-        self.canvas.create_window(280, 170, window=self.btn_unit_m)
-        self.canvas.create_window(360, 170, window=self.btn_unit_yd)
+        self.canvas.create_window(260, 170, window=self.btn_unit_m)
+        self.canvas.create_window(340, 170, window=self.btn_unit_yd)
 
         self.btn_dist_corr = tk.Button(self.canvas, text="보정", width=btn_width, font=btn_font,
                                        command=lambda: self._set_dist("보정"), borderwidth=2, highlightthickness=0)
         self.btn_dist_straight = tk.Button(self.canvas, text="직선", width=btn_width, font=btn_font,
                                            command=lambda: self._set_dist("직선"), borderwidth=2, highlightthickness=0)
-        self.canvas.create_window(280, 230, window=self.btn_dist_corr)
-        self.canvas.create_window(360, 230, window=self.btn_dist_straight)
+        self.canvas.create_window(260, 230, window=self.btn_dist_corr)
+        self.canvas.create_window(340, 230, window=self.btn_dist_straight)
 
         self.btn_score_on = tk.Button(self.canvas, text="사용", width=btn_width, font=btn_font,
                                       command=lambda: self._set_score("사용"), borderwidth=2, highlightthickness=0)
         self.btn_score_off = tk.Button(self.canvas, text="안함", width=btn_width, font=btn_font,
                                        command=lambda: self._set_score("안함"), borderwidth=2, highlightthickness=0)
-        self.canvas.create_window(280, 290, window=self.btn_score_on)
-        self.canvas.create_window(360, 290, window=self.btn_score_off)
+        self.canvas.create_window(260, 290, window=self.btn_score_on)
+        self.canvas.create_window(340, 290, window=self.btn_score_off)
 
         self._refresh_toggle_styles()
 
