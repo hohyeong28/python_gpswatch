@@ -1,3 +1,5 @@
+#setting.py
+
 import tkinter as tk
 from pathlib import Path
 from dataclasses import dataclass
